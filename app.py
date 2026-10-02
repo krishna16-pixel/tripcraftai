@@ -23,6 +23,10 @@ Env vars:
     GLM_BASE_URL          default: https://integrate.api.nvidia.com/v1
     GLM_PLANNING_MODEL    default: z-ai/glm-5.3        (planning / reasoning / tool use)
     GLM_MODEL             legacy alias for GLM_PLANNING_MODEL
+    GLM_AGENT_MODEL       default: GLM_PLANNING_MODEL (live-research chat with tools)
+    GLM_AGENT_MAX_TOKENS  default: 4096 (tool-assisted travel answers)
+    GLM_AGENT_TIMEOUT_SECONDS default: 120
+    GLM_AGENT_REASONING_EFFORT default: low
     GLM_VISION_MODEL      default: z-ai/glm-5.3-flash  (multimodal -- used for image uploads)
     TAVILY_API_KEY        optional. Better web search than the DuckDuckGo fallback.
     MCP_SERVERS_JSON      optional. JSON config overriding the default free MCP
@@ -139,6 +143,25 @@ chat_llm = _build_llm(
     # supported reasoning-effort option so chat requests are accepted.
     extra_body={"reasoning_effort": GLM_CHAT_REASONING_EFFORT},
 )
+
+# Live-research chat model: tool calling needs a bigger token budget than
+# casual chat (reasoning + a full day-by-day itinerary).
+GLM_AGENT_MODEL = os.getenv("GLM_AGENT_MODEL", GLM_PLANNING_MODEL)
+GLM_AGENT_MAX_TOKENS = int(os.getenv("GLM_AGENT_MAX_TOKENS", "4096"))
+GLM_AGENT_TIMEOUT_SECONDS = int(os.getenv("GLM_AGENT_TIMEOUT_SECONDS", "120"))
+GLM_AGENT_REASONING_EFFORT = os.getenv("GLM_AGENT_REASONING_EFFORT", "low")
+
+agent_llm = _build_llm(
+    GLM_AGENT_MODEL,
+    temperature=0.3,
+    streaming=True,
+    max_tokens=GLM_AGENT_MAX_TOKENS,
+    timeout=GLM_AGENT_TIMEOUT_SECONDS,
+    max_retries=1,
+    extra_body={"reasoning_effort": GLM_AGENT_REASONING_EFFORT},
+)
+
+import live_chat  # noqa: E402  (tools + tool-calling loop for /chat)
 
 # --------------------------------------------------------------------------
 # Upload storage (images get a vision pass with GLM-5.3-Flash; files get
@@ -268,7 +291,10 @@ async def _get_research_agent():
     if _agent_executor is not None:
         return _agent_executor
 
-    from langchain.agents import AgentExecutor, create_tool_calling_agent
+    try:
+        from langchain.agents import AgentExecutor, create_tool_calling_agent
+    except ImportError:  # langchain >= 1.0 moved the legacy agents
+        from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
     from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
     tools = await get_agent_tools()
@@ -343,9 +369,10 @@ async def research_phase(
             "\n\nThe previous itinerary draft had these problems -- research "
             "whatever is needed to fix them specifically:\n- " + "\n- ".join(feedback)
         )
+    attachment_block = ("Attachment context:\n" + attachment_context) if attachment_context else ""
     task = (
         f"Trip constraints:\n{constraints.model_dump_json(indent=2)}\n"
-        f"{('Attachment context:\\n' + attachment_context) if attachment_context else ''}"
+        f"{attachment_block}"
         f"{feedback_block}"
     )
     config = None
@@ -492,6 +519,9 @@ async def health():
         "chat_max_tokens": GLM_CHAT_MAX_TOKENS,
         "chat_timeout_seconds": GLM_CHAT_TIMEOUT_SECONDS,
         "vision_model": GLM_VISION_MODEL,
+        "live_chat_model": GLM_AGENT_MODEL,
+        "live_search_backend": "tavily" if os.getenv("TAVILY_API_KEY") else "duckduckgo",
+        "live_tools": [t.name for t in live_chat.TOOLS],
     }
 
 
@@ -511,6 +541,27 @@ async def chat(request: ChatRequest):
             detail="AI chat is not configured. Add NVIDIA_API_KEY to the Render service environment.",
         )
 
+    history = [{"role": t.role, "content": t.content} for t in request.history[-10:]]
+    headers = {"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"}
+
+    def _sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    # Travel / current-info questions -> live research (web search, weather,
+    # exchange rates, real clock). Plain small talk -> the fast chat model.
+    if live_chat.needs_live_research(request.message):
+
+        async def stream_live():
+            try:
+                async for event in live_chat.stream_live_chat(agent_llm, request.message, history):
+                    yield _sse(event)
+                yield "data: [DONE]\n\n"
+            except Exception:
+                logger.exception("Live chat stream failed")
+                yield _sse({"error": "The AI request failed. Check NVIDIA_API_KEY and the model configuration in Render."})
+
+        return StreamingResponse(stream_live(), media_type="text/event-stream", headers=headers)
+
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
     messages = [SystemMessage(content=(
@@ -519,16 +570,11 @@ async def chat(request: ChatRequest):
         "do not turn simple chat into a travel-planning questionnaire. Keep normal "
         "replies short and easy to read, usually one to three sentences, without "
         "unnecessary preamble. When the user asks about travel, help with the "
-        "requested planning and ask only the most useful follow-up question. This "
-        "chat endpoint has no live research tools, so never claim to have verified "
-        "current prices, schedules, opening hours, or bookings."
+        "requested planning and ask only the most useful follow-up question."
     ))]
-    # A short recent context and concise token budget keep casual chat snappy.
-    for turn in request.history[-10:]:
-        if turn.role == "user":
-            messages.append(HumanMessage(content=turn.content))
-        else:
-            messages.append(AIMessage(content=turn.content))
+    for turn in history:
+        messages.append(HumanMessage(content=turn["content"]) if turn["role"] == "user"
+                        else AIMessage(content=turn["content"]))
     messages.append(HumanMessage(content=request.message))
 
     async def stream_reply():
@@ -543,18 +589,13 @@ async def chat(request: ChatRequest):
                 elif not isinstance(token, str):
                     token = str(token or "")
                 if token:
-                    yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+                    yield _sse({"token": token})
             yield "data: [DONE]\n\n"
         except Exception:
             logger.exception("AI chat stream failed")
-            message = "The AI request failed. Check NVIDIA_API_KEY and the chat model configuration in Render."
-            yield f"data: {json.dumps({'error': message})}\n\n"
+            yield _sse({"error": "The AI request failed. Check NVIDIA_API_KEY and the chat model configuration in Render."})
 
-    return StreamingResponse(
-        stream_reply(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
-    )
+    return StreamingResponse(stream_reply(), media_type="text/event-stream", headers=headers)
 
 
 # ---- uploads --------------------------------------------------------------

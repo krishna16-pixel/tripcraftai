@@ -305,6 +305,45 @@
             }
         }
 
+        // Match actual backend activity to the nearest Thinking Orbs state.
+        // The chat tool loop emits human-readable statuses; the trip planner
+        // phase names are included for the existing backend planning stream.
+        const backendPhaseOrbStates = {
+            connecting: 'connecting',
+            architecting: 'connecting',
+            thinking: 'working',
+            working: 'working',
+            orchestrating: 'working',
+            perambulating: 'working',
+            searching: 'searching',
+            mapping: 'shaping',
+            wandering: 'listening',
+            reading: 'listening',
+            plotting: 'composing',
+            writing: 'composing',
+            composing: 'composing',
+            calculating: 'solving',
+            navigating: 'solving',
+            weather: 'searching',
+            exchange: 'searching',
+            'date and time': 'connecting',
+            'dilly dallying': 'weaving',
+            putting: 'weaving',
+            done: 'breathing',
+            failed: 'breathing'
+        };
+
+        function orbStateForBackendStatus(status) {
+            const normalized = String(status || '').toLowerCase();
+            const matchedPhase = Object.keys(backendPhaseOrbStates)
+                .find(phase => normalized.includes(phase));
+            return backendPhaseOrbStates[matchedPhase] || 'working';
+        }
+
+        function setOrbForBackendStatus(host, status) {
+            showThinkingOrb(host, orbStateForBackendStatus(status));
+        }
+
         // DOM Elements
         const plusTrigger = document.getElementById('plusTrigger');
         const fileBtn = document.getElementById('fileBtn');
@@ -568,7 +607,7 @@
             const statusTextNode = statusContainer.querySelector('.status-text');
             statusTextNode.textContent = 'Connecting';
             statusContainer.style.display = 'flex';
-            showThinkingOrb(thinkingOrbHost, 'working');
+            showThinkingOrb(thinkingOrbHost, 'connecting');
             messageInput.disabled = true;
             sendBtn.disabled = true;
 
@@ -607,11 +646,19 @@
                         if (rawData === '[DONE]') return;
                         const data = JSON.parse(rawData);
                         if (data.error) throw new Error(data.error);
+                        if (typeof data.status === 'string' && data.status) {
+                            if (requestConversationId !== conversationId) return;
+                            statusTextNode.textContent = data.status;
+                            statusContainer.style.display = 'flex';
+                            setOrbForBackendStatus(thinkingOrbHost, data.status);
+                            chatArea.scrollTop = chatArea.scrollHeight;
+                            return;
+                        }
                         if (typeof data.token === 'string' && data.token) {
                             if (requestConversationId !== conversationId) return;
                             reply += data.token;
                             statusContainer.style.display = 'none';
-                            showThinkingOrb(thinkingOrbHost, 'breathing');
+                            showThinkingOrb(thinkingOrbHost, 'composing');
                             contentNode.textContent += data.token;
                             chatArea.scrollTop = chatArea.scrollHeight;
                         }
@@ -634,6 +681,8 @@
                 }
 
                 if (requestConversationId !== conversationId) return;
+                showThinkingOrb(thinkingOrbHost, 'breathing');
+                statusContainer.style.display = 'none';
                 if (!reply.trim()) throw new Error('The AI returned an empty response. Please try again.');
                 chatHistory.push({ role: 'assistant', content: reply.trim() });
             } catch (error) {

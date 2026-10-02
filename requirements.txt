@@ -4,19 +4,21 @@ uvicorn[standard]
 python-multipart
 python-dotenv
 pydantic
+httpx
 
-# LangChain agent, NVIDIA-compatible OpenAI API, and MCP integration
-langchain
+# LLM (NVIDIA OpenAI-compatible endpoint) + tool calling
+langchain-core
 langchain-openai
-langchain-community
-langchain-mcp-adapters
-mcp
 
-# Search, geocoding, and optional PDF / Tavily support
-duckduckgo-search
+# Live research tools used by /chat (no `uvx` needed)
+ddgs
 tavily-python
 geopy
 pypdf
 
-# The default MCP servers are launched separately via `uvx` (requires the `uv`
-# CLI); see app.py and mcp.py for the server names and configuration.
+# Optional: legacy /trips research agent + MCP servers
+langchain
+langchain-classic
+langchain-community
+langchain-mcp-adapters
+mcp
