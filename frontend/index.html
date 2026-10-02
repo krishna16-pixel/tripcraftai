@@ -10,6 +10,16 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/lucide@latest"></script>
+    <script type="importmap">
+        {
+            "imports": {
+                "react": "https://esm.sh/react@18.3.1",
+                "react/": "https://esm.sh/react@18.3.1/",
+                "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?external=react",
+                "thinking-orbs": "https://esm.sh/thinking-orbs@0.3.1?external=react"
+            }
+        }
+    </script>
 
     <style>
         body {
@@ -78,6 +88,19 @@
             background-clip: text;
             color: transparent;
             animation: shimmerSweep 1.6s linear infinite;
+        }
+        .thinking-orb-host {
+            width: 20px;
+            height: 20px;
+            flex: 0 0 20px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .thinking-orb-host canvas {
+            display: block;
+            width: 20px;
+            height: 20px;
         }
         @media (prefers-reduced-motion: reduce) {
             .status-text.shimmer {
@@ -229,6 +252,58 @@
 
         // Initialize Lucide icons
         lucide.createIcons();
+
+        // Load Thinking Orbs from Libraries.dev's npm package via esm.sh only
+        // when a response is in flight. The shimmer label remains as a fallback
+        // if the CDN is unavailable.
+        let thinkingOrbModulesPromise;
+        const thinkingOrbRoots = new WeakMap();
+
+        function loadThinkingOrbModules() {
+            if (!thinkingOrbModulesPromise) {
+                thinkingOrbModulesPromise = Promise.all([
+                    import('react'),
+                    import('react-dom/client'),
+                    import('thinking-orbs')
+                ]).then(([ReactModule, ReactDOMClient, OrbsModule]) => ({
+                    React: ReactModule.default,
+                    createRoot: ReactDOMClient.createRoot,
+                    ThinkingOrb: OrbsModule.ThinkingOrb
+                }));
+            }
+            return thinkingOrbModulesPromise;
+        }
+
+        function showThinkingOrb(host, state = 'working') {
+            if (!host) return;
+            host.dataset.active = 'true';
+            loadThinkingOrbModules().then(({ React, createRoot, ThinkingOrb }) => {
+                if (host.dataset.active !== 'true' || !host.isConnected) return;
+                let root = thinkingOrbRoots.get(host);
+                if (!root) {
+                    root = createRoot(host);
+                    thinkingOrbRoots.set(host, root);
+                }
+                root.render(React.createElement(ThinkingOrb, {
+                    state,
+                    size: 20,
+                    theme: 'dark',
+                    'aria-label': 'Thinking'
+                }));
+            }).catch(error => {
+                console.warn('Thinking Orbs could not be loaded from the CDN:', error);
+            });
+        }
+
+        function hideThinkingOrb(host) {
+            if (!host) return;
+            host.dataset.active = 'false';
+            const root = thinkingOrbRoots.get(host);
+            if (root) {
+                root.unmount();
+                thinkingOrbRoots.delete(host);
+            }
+        }
 
         // DOM Elements
         const plusTrigger = document.getElementById('plusTrigger');
@@ -466,7 +541,8 @@
             innerDiv.innerHTML = `
                 <div class="w-full space-y-2">
                     <!-- Plain-text activity label replaces the avatar and spinner. -->
-                    <div class="ai-status min-h-6 flex items-center" style="display:none;" aria-live="polite">
+                    <div class="ai-status min-h-6 flex items-center gap-2" style="display:none;" aria-live="polite">
+                        <span class="thinking-orb-host" aria-hidden="true"></span>
                         <span class="status-text shimmer"></span>
                     </div>
                     <!-- Final text content container -->
@@ -488,8 +564,10 @@
         // Send the user's message and recent conversation to the real AI backend.
         async function handleAIResponse(prompt, statusContainer, contentNode, history, requestConversationId) {
             const statusTextNode = statusContainer.querySelector('.status-text');
+            const thinkingOrbHost = statusContainer.querySelector('.thinking-orb-host');
             statusTextNode.textContent = 'Connecting';
             statusContainer.style.display = 'flex';
+            showThinkingOrb(thinkingOrbHost, 'working');
             messageInput.disabled = true;
             sendBtn.disabled = true;
 
@@ -515,6 +593,7 @@
                     reply = typeof data.reply === 'string' ? data.reply.trim() : '';
                     contentNode.textContent = reply;
                     statusContainer.style.display = 'none';
+                    hideThinkingOrb(thinkingOrbHost);
                 } else if (contentType.includes('text/event-stream') && response.body) {
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
@@ -531,6 +610,7 @@
                             if (requestConversationId !== conversationId) return;
                             reply += data.token;
                             statusContainer.style.display = 'none';
+                            hideThinkingOrb(thinkingOrbHost);
                             contentNode.textContent += data.token;
                             chatArea.scrollTop = chatArea.scrollHeight;
                         }
@@ -559,8 +639,10 @@
                 if (requestConversationId !== conversationId) return;
                 console.error('AI chat request failed:', error);
                 statusContainer.style.display = 'none';
+                hideThinkingOrb(thinkingOrbHost);
                 contentNode.textContent = `I couldn't get an AI response: ${error.message}`;
             } finally {
+                hideThinkingOrb(thinkingOrbHost);
                 if (requestConversationId === conversationId) {
                     messageInput.disabled = false;
                     sendBtn.disabled = false;
