@@ -99,6 +99,7 @@ NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 GLM_MODEL = os.getenv("GLM_MODEL", "z-ai/glm-5.3")
 GLM_VISION_MODEL = os.getenv("GLM_VISION_MODEL", "z-ai/glm-5.3-flash")
+GLM_CHAT_MODEL = os.getenv("GLM_CHAT_MODEL", "z-ai/glm-5.3-flash")
 
 if not NVIDIA_API_KEY:
     logger.warning(
@@ -107,7 +108,7 @@ if not NVIDIA_API_KEY:
     )
 
 
-def _build_llm(model: str, temperature: float = 0.3):
+def _build_llm(model: str, temperature: float = 0.3, **client_options):
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
@@ -115,10 +116,19 @@ def _build_llm(model: str, temperature: float = 0.3):
         api_key=NVIDIA_API_KEY or "unset",
         base_url=GLM_BASE_URL,
         temperature=temperature,
+        **client_options,
     )
 
 
 llm = _build_llm(GLM_MODEL, temperature=0.3)
+chat_llm = _build_llm(
+    GLM_CHAT_MODEL,
+    temperature=0.4,
+    streaming=True,
+    max_tokens=512,
+    timeout=45,
+    max_retries=0,
+)
 
 # --------------------------------------------------------------------------
 # Upload storage (images get a vision pass with GLM-5.3-Flash; files get
@@ -463,7 +473,12 @@ class ChatRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": GLM_MODEL, "vision_model": GLM_VISION_MODEL}
+    return {
+        "status": "ok",
+        "model": GLM_MODEL,
+        "chat_model": GLM_CHAT_MODEL,
+        "vision_model": GLM_VISION_MODEL,
+    }
 
 
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
@@ -499,27 +514,30 @@ async def chat(request: ChatRequest):
             messages.append(AIMessage(content=turn.content))
     messages.append(HumanMessage(content=request.message))
 
-    try:
-        result = await llm.ainvoke(messages)
-    except Exception as exc:
-        logger.exception("AI chat request failed")
-        raise HTTPException(
-            status_code=502,
-            detail="The AI request failed. Check NVIDIA_API_KEY and the model configuration in Render.",
-        ) from exc
+    async def stream_reply():
+        try:
+            async for chunk in chat_llm.astream(messages):
+                token = chunk.content
+                if isinstance(token, list):
+                    token = "".join(
+                        part.get("text", "") if isinstance(part, dict) else str(part)
+                        for part in token
+                    )
+                elif not isinstance(token, str):
+                    token = str(token or "")
+                if token:
+                    yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception:
+            logger.exception("AI chat stream failed")
+            message = "The AI request failed. Check NVIDIA_API_KEY and the chat model configuration in Render."
+            yield f"data: {json.dumps({'error': message})}\n\n"
 
-    reply = result.content
-    if isinstance(reply, list):
-        reply = "\n".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in reply
-        )
-    if not isinstance(reply, str):
-        reply = str(reply)
-    reply = reply.strip()
-    if not reply:
-        raise HTTPException(status_code=502, detail="The AI returned an empty response.")
-    return {"reply": reply}
+    return StreamingResponse(
+        stream_reply(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---- uploads --------------------------------------------------------------

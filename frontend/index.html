@@ -493,30 +493,61 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: prompt, history })
                 });
-                const data = await response.json().catch(() => ({}));
                 if (!response.ok) {
+                    const data = await response.json().catch(() => ({}));
                     const message = response.status === 404
                         ? `Chat API not found at ${BACKEND_URL}/chat. Refresh the latest frontend and try again.`
                         : (data.detail || `AI request failed (${response.status}).`);
                     throw new Error(message);
                 }
 
-                const reply = typeof data.reply === 'string' ? data.reply.trim() : '';
-                if (!reply) throw new Error('The AI returned an empty response. Please try again.');
-                if (requestConversationId !== conversationId) return;
+                let reply = '';
+                const contentType = response.headers.get('content-type') || '';
+                if (contentType.includes('application/json')) {
+                    const data = await response.json();
+                    reply = typeof data.reply === 'string' ? data.reply.trim() : '';
+                    contentNode.textContent = reply;
+                    statusContainer.style.display = 'none';
+                } else if (contentType.includes('text/event-stream') && response.body) {
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
 
-                chatHistory.push({ role: 'assistant', content: reply });
-                statusContainer.style.display = 'none';
+                    const processEvent = (event) => {
+                        const line = event.split(/\r?\n/).find(item => item.startsWith('data:'));
+                        if (!line) return;
+                        const rawData = line.slice(5).trim();
+                        if (rawData === '[DONE]') return;
+                        const data = JSON.parse(rawData);
+                        if (data.error) throw new Error(data.error);
+                        if (typeof data.token === 'string' && data.token) {
+                            if (requestConversationId !== conversationId) return;
+                            reply += data.token;
+                            statusContainer.style.display = 'none';
+                            contentNode.textContent += data.token;
+                            chatArea.scrollTop = chatArea.scrollHeight;
+                        }
+                    };
 
-                // Reveal the real response gradually without inserting HTML from the model.
-                const chunks = reply.split(/(\s+)/).filter(Boolean);
-                for (let i = 0; i < chunks.length && requestConversationId === conversationId; i++) {
-                    contentNode.textContent += chunks[i];
-                    if (i % 5 === 0) {
-                        chatArea.scrollTop = chatArea.scrollHeight;
-                        await new Promise(resolve => setTimeout(resolve, 18));
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (value) buffer += decoder.decode(value, { stream: true });
+                        if (done) buffer += decoder.decode();
+                        const events = buffer.split(/\r?\n\r?\n/);
+                        buffer = events.pop() || '';
+                        for (const event of events) processEvent(event);
+                        if (done) {
+                            if (buffer.trim()) processEvent(buffer);
+                            break;
+                        }
                     }
+                } else {
+                    throw new Error('The chat server returned an unexpected response format.');
                 }
+
+                if (requestConversationId !== conversationId) return;
+                if (!reply.trim()) throw new Error('The AI returned an empty response. Please try again.');
+                chatHistory.push({ role: 'assistant', content: reply.trim() });
             } catch (error) {
                 if (requestConversationId !== conversationId) return;
                 console.error('AI chat request failed:', error);
