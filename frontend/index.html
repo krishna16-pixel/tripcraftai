@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smooth Input with Background Scanner</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #030303; /* Deep black background */
+            color: #ffffff;
+            overflow-x: hidden;
+            margin: 0;
+            padding: 0;
+        }
+
+        .smooth-transition {
+            transition: all 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+            will-change: transform, width, height, opacity, border-radius, padding;
+        }
+
+        .gooey-wrapper {
+            filter: url(#liquid-gooey-filter);
+        }
+
+        textarea::-webkit-scrollbar {
+            width: 4px;
+        }
+        textarea::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        textarea::-webkit-scrollbar-thumb {
+            background: #444;
+            border-radius: 4px;
+        }
+
+        .input-glow {
+        .input-glow {
+            background: radial-gradient(circle, rgba(255,255,255,0.03) 0%, rgba(0,0,0,0) 70%);
+        }
+
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in-up {
+            animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+    </style>
+</head>
+<body class="h-screen w-screen overflow-hidden flex bg-[#030303] text-white">
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="fixed left-0 top-0 h-full w-[260px] bg-[#0a0a0a] border-r border-[#1f1f1f] transform -translate-x-full transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] z-50 flex flex-col shadow-2xl">
+        
+        <!-- Sidebar Header with Brand -->
+        <div class="p-4 flex items-center justify-between">
+            <span class="text-2xl tracking-wide text-white" style="font-family: 'Sinistre', serif;">TripCraft</span>
+            <button id="closeSidebarBtn" class="text-gray-400 hover:text-white p-2 rounded-lg hover:bg-[#1a1a1a] transition-colors cursor-pointer" title="Close Sidebar">
+                <i data-lucide="panel-left-close" class="w-5 h-5"></i>
+            </button>
+        </div>
+
+        <!-- New Chat Button -->
+        <div class="px-3 mb-2 mt-1">
+            <button id="newChatBtn" class="w-full flex items-center gap-3 text-gray-200 hover:text-white hover:bg-[#1a1a1a] p-2 rounded-lg transition-colors text-sm font-medium">
+                <i data-lucide="square-pen" class="w-4 h-4 shrink-0"></i> New Chat
+            </button>
+        </div>
+
+        <div class="px-3 py-2 flex-1 overflow-y-auto">
+            <div class="text-xs font-semibold text-gray-600 mb-2 px-2 mt-2">Recent</div>
+            <button class="w-full text-left p-2 rounded-lg hover:bg-[#1a1a1a] text-gray-400 text-sm flex items-center gap-3 transition-colors truncate">
+                <i data-lucide="message-circle" class="w-4 h-4 shrink-0"></i> Web Design Ideas
+            </button>
+            <button class="w-full text-left p-2 rounded-lg hover:bg-[#1a1a1a] text-gray-400 text-sm flex items-center gap-3 transition-colors truncate">
+                <i data-lucide="message-circle" class="w-4 h-4 shrink-0"></i> Smooth Animation CSS
+            </button>
+        </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <div id="mainContent" class="flex-1 flex flex-col h-full relative transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] w-full">
+        
+        <!-- Top bar with open button -->
+        <header class="absolute top-0 left-0 w-full p-4 z-40">
+            <button id="openSidebarBtn" class="text-gray-400 hover:text-white p-2 rounded-lg hover:bg-[#1a1a1a] transition-colors cursor-pointer" title="Open Menu">
+                <i data-lucide="panel-left" class="w-5 h-5"></i>
+            </button>
+        </header>
+        
+        <!-- Chat Area (Initially Hidden) -->
+        <div id="chatArea" class="w-full max-w-3xl mx-auto pt-20 pb-4 px-4 overflow-y-auto flex-col gap-6 hidden opacity-0 transition-opacity duration-700 z-10 scroll-smooth" style="flex: 1 1 0%;">
+            <!-- Messages will be injected here by JS -->
+        </div>
+
+        <!-- Center Input Section -->
+        <div id="inputSectionContainer" class="flex-1 flex items-center justify-center p-4 relative w-full transition-all duration-700 ease-[cubic-bezier(0.16,1,0.3,1)]">
+
+    <svg class="absolute w-0 h-0 pointer-events-none" aria-hidden="true">
+        <defs>
+            <filter id="liquid-gooey-filter">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur" />
+                <feColorMatrix 
+                    in="blur" 
+                    mode="matrix" 
+                    values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -7" 
+                    result="goo" 
+                />
+                <feComposite in="SourceGraphic" in2="goo" operator="atop" />
+            </filter>
+        </defs>
+    </svg>
+
+    <!-- Main Container -->
+    <div id="mainInputContainer" class="relative w-full max-w-lg flex items-center justify-center z-10 transition-all duration-700 ease-[cubic-bezier(0.16,1,0.3,1)]">
+
+        <!-- Dynamic Input Wrapper -->
+        <div id="inputWrapper" class="relative z-10 w-full max-w-[760px] bg-[#0a0a0a]/90 backdrop-blur-md border border-[#222] rounded-full px-5 py-1.5 smooth-transition shadow-[0_4px_30px_rgba(0,0,0,0.6)] focus-within:border-[#444] focus-within:bg-[#111]/90 flex items-end">
+
+            <div class="relative w-full flex items-end z-20">
+                
+                <!-- Gooey Action Menu -->
+                <div class="relative flex items-center justify-center mb-0.5">
+                    <div class="relative flex items-center justify-center gooey-wrapper" style="width: 36px; height: 36px;">
+                        
+                        <!-- Option 1: File -->
+                        <div id="fileBtn" class="absolute flex items-center justify-center smooth-transition" style="transform: translate(0px, 0px); z-index: 1;">
+                            <button class="w-8 h-8 rounded-full bg-[#1a1a1a] text-gray-400 hover:text-white hover:bg-[#333] flex items-center justify-center transition-colors cursor-pointer shadow-md" title="Upload File">
+                                <i data-lucide="file-text" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+
+                        <!-- Option 2: Image -->
+                        <div id="imageBtn" class="absolute flex items-center justify-center smooth-transition" style="transform: translate(0px, 0px); z-index: 1;">
+                            <button class="w-8 h-8 rounded-full bg-[#1a1a1a] text-gray-400 hover:text-white hover:bg-[#333] flex items-center justify-center transition-colors cursor-pointer shadow-md" title="Upload Image">
+                                <i data-lucide="image" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+
+                        <!-- Main Trigger Button (+ icon) -->
+                        <div class="absolute flex items-center justify-center" style="transform: translate(0px, 0px); z-index: 10;">
+                            <button id="plusTrigger" class="w-8 h-8 rounded-full bg-[#1a1a1a] text-gray-400 hover:text-white hover:bg-[#333] flex items-center justify-center smooth-transition cursor-pointer shadow-md" aria-label="Add attachment">
+                                <i data-lucide="plus" class="w-4 h-4 smooth-transition"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Textarea -->
+                <div class="flex-grow mx-3.5 my-0.5 flex items-center">
+                    <textarea 
+                        id="messageInput"
+                        rows="1"
+                        class="w-full bg-transparent text-white border-none py-1.5 text-base font-light outline-none resize-none placeholder:text-[#555] focus:placeholder:text-[#888] leading-relaxed max-h-44"
+                        placeholder="Ask Gemini..."
+                        spellcheck="false"
+                    ></textarea>
+                </div>
+
+                <div class="flex items-center gap-2 mb-1">
+                    <!-- Voice Mode Button -->
+                    <button id="voiceBtn" class="w-8 h-8 rounded-full text-gray-400 hover:text-white hover:bg-[#222] flex items-center justify-center transition-colors cursor-pointer" title="Voice Mode">
+                        <i data-lucide="mic" class="w-4 h-4"></i>
+                    </button>
+
+                    <!-- Send Button (Expands out when typing) -->
+                    <div id="sendWrapper" class="overflow-hidden transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] flex items-center" style="width: 0px; opacity: 0; transform: scale(0.85); will-change: width, opacity, transform;">
+                        <button id="sendBtn" class="w-8 h-8 rounded-full bg-white text-black hover:bg-gray-200 flex items-center justify-center transition-transform active:scale-95 cursor-pointer shadow-sm ml-0.5" title="Send Message">
+                            <i data-lucide="arrow-up" class="w-4 h-4 stroke-[2.5]"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Ambient Glow behind the input -->
+        <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[90%] h-[80%] input-glow blur-2xl opacity-100 transition-opacity duration-500 pointer-events-none -z-10"></div>
+    </div>
+
+    </div> <!-- Close center flex section -->
+    </div> <!-- Close mainContent wrapper -->
+
+    <script>
+        // Initialize Lucide icons
+        lucide.createIcons();
+
+        // DOM Elements
+        const plusTrigger = document.getElementById('plusTrigger');
+        const fileBtn = document.getElementById('fileBtn');
+        const imageBtn = document.getElementById('imageBtn');
+        const messageInput = document.getElementById('messageInput');
+        const sendWrapper = document.getElementById('sendWrapper');
+        const sendBtn = document.getElementById('sendBtn');
+        const inputWrapper = document.getElementById('inputWrapper');
+        const bodyElement = document.body;
+
+        // New Chat Elements
+        const chatArea = document.getElementById('chatArea');
+        const inputSectionContainer = document.getElementById('inputSectionContainer');
+        const mainInputContainer = document.getElementById('mainInputContainer');
+        let isChatActive = false;
+
+        // Sidebar Elements
+        const sidebar = document.getElementById('sidebar');
+        const openSidebarBtn = document.getElementById('openSidebarBtn');
+        const closeSidebarBtn = document.getElementById('closeSidebarBtn');
+        const newChatBtn = document.getElementById('newChatBtn');
+
+        let isOpen = false;
+        let isSidebarOpen = false;
+
+        // Sidebar Toggle Logic
+        function toggleSidebar() {
+            isSidebarOpen = !isSidebarOpen;
+            if (isSidebarOpen) {
+                sidebar.classList.remove('-translate-x-full');
+            } else {
+                sidebar.classList.add('-translate-x-full');
+            }
+        }
+
+        openSidebarBtn.addEventListener('click', toggleSidebar);
+        closeSidebarBtn.addEventListener('click', toggleSidebar);
+
+        function resetChat() {
+            if (!isChatActive) return; // Do nothing if already on a fresh screen
+            
+            isChatActive = false;
+
+            // Fade out chat area
+            chatArea.classList.remove('opacity-100');
+            chatArea.classList.add('opacity-0');
+            
+            // Wait for fade out, then hide and clear
+            setTimeout(() => {
+                chatArea.classList.remove('flex');
+                chatArea.classList.add('hidden');
+                chatArea.innerHTML = '';
+            }, 700);
+
+            // Restore layout centering
+            inputSectionContainer.classList.remove('pb-6');
+            inputSectionContainer.classList.add('flex-1', 'items-center');
+            
+            // Restore input width
+            mainInputContainer.classList.remove('max-w-3xl');
+            mainInputContainer.classList.add('max-w-lg');
+
+            // Close sidebar for clean slate
+            if (isSidebarOpen) {
+                toggleSidebar();
+            }
+        }
+
+        newChatBtn.addEventListener('click', resetChat);
+
+        // Function to reposition gooey buttons based on input expansion state
+        function updateGooeyOffsets() {
+            const isExpanded = inputWrapper.classList.contains('rounded-2xl');
+            if (isOpen) {
+                const yOffset = isExpanded ? -52 : -44;
+                const xOffset = isExpanded ? 42 : 38;
+                fileBtn.style.transform = `translate(0px, ${yOffset}px)`;
+                imageBtn.style.transform = `translate(${xOffset}px, ${yOffset + 10}px)`;
+            } else {
+                fileBtn.style.transform = 'translate(0px, 0px)';
+                imageBtn.style.transform = 'translate(0px, 0px)';
+            }
+        }
+
+        // Toggle Gooey Menu
+        plusTrigger.addEventListener('click', (e) => {
+            e.stopPropagation();
+            isOpen = !isOpen;
+
+            updateGooeyOffsets();
+
+            if (isOpen) {
+                plusTrigger.style.transform = 'rotate(45deg)';
+                plusTrigger.classList.add('bg-[#333]', 'text-white');
+            } else {
+                plusTrigger.style.transform = 'rotate(0deg)';
+                plusTrigger.classList.remove('bg-[#333]', 'text-white');
+            }
+        });
+
+        // Close Gooey Menu on outside click
+        document.addEventListener('click', () => {
+            if (isOpen) {
+                isOpen = false;
+                fileBtn.style.transform = 'translate(0px, 0px)';
+                imageBtn.style.transform = 'translate(0px, 0px)';
+                plusTrigger.style.transform = 'rotate(0deg)';
+                plusTrigger.classList.remove('bg-[#333]', 'text-white');
+            }
+        });
+
+        // Auto-resize textarea and toggle send button / shimmer effect
+        messageInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 140) + 'px';
+
+            const hasText = this.value.trim().length > 0;
+
+            if (hasText) {
+                sendWrapper.style.width = '32px';
+                sendWrapper.style.opacity = '1';
+                sendWrapper.style.transform = 'scale(1)';
+                
+                inputWrapper.classList.remove('rounded-full', 'px-5', 'py-1');
+                inputWrapper.classList.add('rounded-2xl', 'px-5', 'py-4');
+            } else {
+                sendWrapper.style.width = '0px';
+                sendWrapper.style.opacity = '0';
+                sendWrapper.style.transform = 'scale(0.85)';
+                
+                inputWrapper.classList.remove('rounded-2xl', 'px-5', 'py-4');
+                inputWrapper.classList.add('rounded-full', 'px-5', 'py-1');
+            }
+
+            if (isOpen) {
+                updateGooeyOffsets();
+            }
+        });
+
+        // Handle Submit logic
+        function submitMessage() {
+            const text = messageInput.value.trim();
+            if (text.length === 0) return;
+            
+            // Transition to chat layout on first message
+            if (!isChatActive) {
+                isChatActive = true;
+                
+                // Shift input to bottom
+                inputSectionContainer.classList.remove('flex-1', 'items-center');
+                inputSectionContainer.classList.add('pb-6');
+                
+                // Expand input width
+                mainInputContainer.classList.remove('max-w-lg');
+                mainInputContainer.classList.add('max-w-3xl');
+                
+                // Show chat area
+                chatArea.classList.remove('hidden');
+                chatArea.classList.add('flex');
+                
+                // Slight delay to allow display:flex to apply before animating opacity
+                setTimeout(() => {
+                    chatArea.classList.remove('opacity-0');
+                    chatArea.classList.add('opacity-100');
+                }, 50);
+            }
+
+            // Add User Message
+            appendUserMessage(text);
+            
+            // Reset input state immediately
+            messageInput.value = '';
+            messageInput.style.height = 'auto';
+            
+            sendWrapper.style.width = '0px';
+            sendWrapper.style.opacity = '0';
+            sendWrapper.style.transform = 'scale(0.85)';
+            
+            inputWrapper.classList.remove('rounded-2xl', 'px-5', 'py-4');
+            inputWrapper.classList.add('rounded-full', 'px-5', 'py-1');
+
+            if (isOpen) {
+                isOpen = false;
+                fileBtn.style.transform = 'translate(0px, 0px)';
+                imageBtn.style.transform = 'translate(0px, 0px)';
+                plusTrigger.style.transform = 'rotate(0deg)';
+                plusTrigger.classList.remove('bg-[#333]', 'text-white');
+            }
+            
+            // Setup empty AI Response Node & Trigger Streaming Handler
+            const aiNodes = appendAIMessage();
+            handleSSEStream(text, aiNodes.statusNode, aiNodes.contentNode);
+        }
+
+        // Send Button Click
+        sendBtn.addEventListener('click', submitMessage);
+
+        // Append User Message Helper
+        function appendUserMessage(content) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `flex w-full animate-fade-in-up justify-end`;
+            
+            const innerDiv = document.createElement('div');
+            innerDiv.className = 'max-w-[75%] bg-[#222] text-white px-5 py-3 rounded-2xl rounded-tr-sm text-sm font-light leading-relaxed shadow-md';
+            innerDiv.textContent = content;
+            
+            msgDiv.appendChild(innerDiv);
+            chatArea.appendChild(msgDiv);
+            
+            // Scroll to bottom
+            setTimeout(() => {
+                chatArea.scrollTop = chatArea.scrollHeight;
+            }, 50);
+        }
+
+        // Append AI Message Skeleton
+        function appendAIMessage() {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `flex w-full animate-fade-in-up justify-start`;
+            
+            const innerDiv = document.createElement('div');
+            innerDiv.className = 'max-w-[85%] text-gray-200 text-sm font-light leading-relaxed w-full';
+            innerDiv.innerHTML = `
+                <div class="flex gap-4">
+                    <div class="w-8 h-8 rounded-full bg-[#1a1a1a] border border-[#333] flex-shrink-0 flex items-center justify-center shadow-md">
+                        <i data-lucide="sparkles" class="w-4 h-4 text-gray-300"></i>
+                    </div>
+                    <div class="pt-1.5 space-y-2 flex-1">
+                        <!-- Streaming Status Container -->
+                        <div class="ai-status text-xs font-mono text-[#888] italic animate-pulse flex items-center gap-2" style="display:none;">
+                            <i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i>
+                            <span class="status-text"></span>
+                        </div>
+                        <!-- Final Text Content Container -->
+                        <div class="ai-content leading-relaxed"></div>
+                    </div>
+                </div>
+            `;
+            
+            msgDiv.appendChild(innerDiv);
+            chatArea.appendChild(msgDiv);
+            lucide.createIcons({ root: msgDiv }); // Initialize loading spinner
+            
+            setTimeout(() => { chatArea.scrollTop = chatArea.scrollHeight; }, 50);
+
+            return {
+                statusNode: msgDiv.querySelector('.ai-status'),
+                statusTextNode: msgDiv.querySelector('.status-text'),
+                contentNode: msgDiv.querySelector('.ai-content')
+            };
+        }
+
+        // Simulated SSE (Server-Sent Events) Handler
+        function handleSSEStream(prompt, statusContainer, contentNode) {
+            /* 
+             * To connect to a real backend, you would use:
+             * const sse = new EventSource('/api/chat/stream?q=' + encodeURIComponent(prompt));
+             * sse.addEventListener('status', (e) => updateStatus(e.data));
+             * sse.addEventListener('token', (e) => appendToken(e.data));
+             * sse.addEventListener('done', () => sse.close());
+             */
+
+            // Simulation of deep reasoning phases
+            const phases = ['Searching', 'Planning', 'Thinking', 'Solving', 'Shaping', 'Fathoming'];
+            let currentPhase = 0;
+            
+            statusContainer.style.display = 'flex';
+            const statusTextNode = statusContainer.querySelector('.status-text');
+            
+            // Loop through reasoning phases (updates every 700ms)
+            const thinkingInterval = setInterval(() => {
+                if (currentPhase < phases.length) {
+                    statusTextNode.textContent = phases[currentPhase] + '...';
+                    chatArea.scrollTop = chatArea.scrollHeight;
+                    currentPhase++;
+                } else {
+                    clearInterval(thinkingInterval);
+                    
+                    // Hide reasoning indicator when finished
+                    statusContainer.style.display = 'none';
+                    
+                    // Simulate standard streaming response
+                    const response = "This is a streamed response provided by the simulated SSE handler. After successfully traversing the deep reasoning phases, the AI determined that the best way to respond to your prompt was to stream this text token-by-token for a fluid, real-time feel.";
+                    const tokens = response.split(' ');
+                    let tokenIdx = 0;
+                    
+                    // Append tokens every 50ms
+                    const streamInterval = setInterval(() => {
+                        if (tokenIdx < tokens.length) {
+                            contentNode.innerHTML += tokens[tokenIdx] + ' ';
+                            chatArea.scrollTop = chatArea.scrollHeight;
+                            tokenIdx++;
+                        } else {
+                            clearInterval(streamInterval);
+                        }
+                    }, 50); 
+                }
+            }, 700); 
+        }
+
+        // Enter Key to Send
+        messageInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitMessage();
+            }
+        });
+    </script>
+</body>
+</html>
