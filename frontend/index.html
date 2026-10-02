@@ -42,7 +42,6 @@
         }
 
         .input-glow {
-        .input-glow {
             background: radial-gradient(circle, rgba(255,255,255,0.03) 0%, rgba(0,0,0,0) 70%);
         }
 
@@ -79,6 +78,13 @@
             background-clip: text;
             color: transparent;
             animation: shimmerSweep 1.6s linear infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .status-text.shimmer {
+                animation: none;
+                background-image: none;
+                color: #b8b8b8;
+            }
         }
     </style>
 </head>

@@ -21,7 +21,8 @@ Env vars:
                            there at $0 input/output as of this writing --
                            check build.nvidia.com/z-ai/glm-5-3 for current terms.
     GLM_BASE_URL          default: https://integrate.api.nvidia.com/v1
-    GLM_MODEL             default: z-ai/glm-5.3        (planning / reasoning / tool use)
+    GLM_PLANNING_MODEL    default: z-ai/glm-5.3        (planning / reasoning / tool use)
+    GLM_MODEL             legacy alias for GLM_PLANNING_MODEL
     GLM_VISION_MODEL      default: z-ai/glm-5.3-flash  (multimodal -- used for image uploads)
     TAVILY_API_KEY        optional. Better web search than the DuckDuckGo fallback.
     MCP_SERVERS_JSON      optional. JSON config overriding the default free MCP
@@ -30,6 +31,7 @@ Env vars:
     MCP_SERVERS_FILE      optional. Path to a JSON file with the same config.
     MCP_USE_DEFAULT_SERVERS  default: true. Set "false" to run with no MCP
                            servers instead of the free defaults.
+    GLM_CHAT_MAX_TOKENS   default: 192 (short output budget for ordinary chat)
     UPLOAD_DIR             default: ./uploads
 
 Why NVIDIA + GLM-5.3: NVIDIA's API catalog (build.nvidia.com) hosts GLM-5.3
@@ -97,10 +99,13 @@ from trip_mcp import (  # noqa: E402  (module built dynamically above)
 
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://integrate.api.nvidia.com/v1")
-GLM_MODEL = os.getenv("GLM_MODEL", "z-ai/glm-5.3")
+GLM_PLANNING_MODEL = os.getenv(
+    "GLM_PLANNING_MODEL", os.getenv("GLM_MODEL", "z-ai/glm-5.3")
+)
 GLM_VISION_MODEL = os.getenv("GLM_VISION_MODEL", "z-ai/glm-5.3-flash")
 GLM_CHAT_MODEL = os.getenv("GLM_CHAT_MODEL", "z-ai/glm-5.3-flash")
 GLM_CHAT_REASONING_EFFORT = os.getenv("GLM_CHAT_REASONING_EFFORT", "low")
+GLM_CHAT_MAX_TOKENS = int(os.getenv("GLM_CHAT_MAX_TOKENS", "192"))
 GLM_CHAT_TIMEOUT_SECONDS = int(os.getenv("GLM_CHAT_TIMEOUT_SECONDS", "90"))
 
 if not NVIDIA_API_KEY:
@@ -122,12 +127,12 @@ def _build_llm(model: str, temperature: float = 0.3, **client_options):
     )
 
 
-llm = _build_llm(GLM_MODEL, temperature=0.3)
+llm = _build_llm(GLM_PLANNING_MODEL, temperature=0.3)
 chat_llm = _build_llm(
     GLM_CHAT_MODEL,
     temperature=0.4,
     streaming=True,
-    max_tokens=256,
+    max_tokens=GLM_CHAT_MAX_TOKENS,
     timeout=GLM_CHAT_TIMEOUT_SECONDS,
     max_retries=0,
     extra_body={"reasoning_effort": GLM_CHAT_REASONING_EFFORT, "clear_thinking": True},
@@ -478,9 +483,11 @@ class ChatRequest(BaseModel):
 async def health():
     return {
         "status": "ok",
-        "model": GLM_MODEL,
+        "model": GLM_PLANNING_MODEL,
+        "planning_model": GLM_PLANNING_MODEL,
         "chat_model": GLM_CHAT_MODEL,
         "chat_reasoning_effort": GLM_CHAT_REASONING_EFFORT,
+        "chat_max_tokens": GLM_CHAT_MAX_TOKENS,
         "chat_timeout_seconds": GLM_CHAT_TIMEOUT_SECONDS,
         "vision_model": GLM_VISION_MODEL,
     }
@@ -514,7 +521,8 @@ async def chat(request: ChatRequest):
         "chat endpoint has no live research tools, so never claim to have verified "
         "current prices, schedules, opening hours, or bookings."
     ))]
-    for turn in request.history[-20:]:
+    # A short recent context and concise token budget keep casual chat snappy.
+    for turn in request.history[-10:]:
         if turn.role == "user":
             messages.append(HumanMessage(content=turn.content))
         else:
