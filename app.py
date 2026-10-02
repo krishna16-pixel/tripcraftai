@@ -128,6 +128,7 @@ chat_llm = _build_llm(
     max_tokens=256,
     timeout=45,
     max_retries=0,
+    extra_body={"reasoning_effort": "low", "clear_thinking": True},
 )
 
 # --------------------------------------------------------------------------
