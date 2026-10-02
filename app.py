@@ -101,6 +101,7 @@ GLM_MODEL = os.getenv("GLM_MODEL", "z-ai/glm-5.3")
 GLM_VISION_MODEL = os.getenv("GLM_VISION_MODEL", "z-ai/glm-5.3-flash")
 GLM_CHAT_MODEL = os.getenv("GLM_CHAT_MODEL", "z-ai/glm-5.3-flash")
 GLM_CHAT_REASONING_EFFORT = os.getenv("GLM_CHAT_REASONING_EFFORT", "low")
+GLM_CHAT_TIMEOUT_SECONDS = int(os.getenv("GLM_CHAT_TIMEOUT_SECONDS", "90"))
 
 if not NVIDIA_API_KEY:
     logger.warning(
@@ -127,7 +128,7 @@ chat_llm = _build_llm(
     temperature=0.4,
     streaming=True,
     max_tokens=256,
-    timeout=90,
+    timeout=GLM_CHAT_TIMEOUT_SECONDS,
     max_retries=0,
     extra_body={"reasoning_effort": GLM_CHAT_REASONING_EFFORT, "clear_thinking": True},
 )
@@ -480,6 +481,7 @@ async def health():
         "model": GLM_MODEL,
         "chat_model": GLM_CHAT_MODEL,
         "chat_reasoning_effort": GLM_CHAT_REASONING_EFFORT,
+        "chat_timeout_seconds": GLM_CHAT_TIMEOUT_SECONDS,
         "vision_model": GLM_VISION_MODEL,
     }
 
