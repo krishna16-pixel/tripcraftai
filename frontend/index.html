@@ -208,11 +208,10 @@
     </div> <!-- Close mainContent wrapper -->
 
     <script>
-        // Backend API base URL — hardcoded here in code, not exposed as a UI input.
-        // Change this value to point at your deployed backend.
-        const BACKEND_URL = window.location.protocol === 'file:'
+        // Use the API service directly, even when the frontend is hosted elsewhere.
+        const BACKEND_URL = ['localhost', '127.0.0.1'].includes(window.location.hostname)
             ? 'http://localhost:8000'
-            : window.location.origin;
+            : 'https://tripcraftai-8lnh.onrender.com';
 
         // Initialize Lucide icons
         lucide.createIcons();
@@ -496,7 +495,10 @@
                 });
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok) {
-                    throw new Error(data.detail || `AI request failed (${response.status}).`);
+                    const message = response.status === 404
+                        ? `Chat API not found at ${BACKEND_URL}/chat. Refresh the latest frontend and try again.`
+                        : (data.detail || `AI request failed (${response.status}).`);
+                    throw new Error(message);
                 }
 
                 const reply = typeof data.reply === 'string' ? data.reply.trim() : '';
