@@ -127,7 +127,7 @@ chat_llm = _build_llm(
     temperature=0.4,
     streaming=True,
     max_tokens=256,
-    timeout=45,
+    timeout=90,
     max_retries=0,
     extra_body={"reasoning_effort": GLM_CHAT_REASONING_EFFORT, "clear_thinking": True},
 )
