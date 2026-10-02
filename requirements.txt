@@ -1,0 +1,22 @@
+# Core web application
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+pydantic
+
+# LangChain agent, NVIDIA-compatible OpenAI API, and MCP integration
+langchain
+langchain-openai
+langchain-community
+langchain-mcp-adapters
+mcp
+
+# Search, geocoding, and optional PDF / Tavily support
+duckduckgo-search
+tavily-python
+geopy
+pypdf
+
+# The default MCP servers are launched separately via `uvx` (requires the `uv`
+# CLI); see app.py and mcp.py for the server names and configuration.
