@@ -362,6 +362,7 @@
             setTimeout(() => {
                 chatArea.classList.remove('flex');
                 chatArea.classList.add('hidden');
+                chatArea.querySelectorAll('.thinking-orb-host').forEach(hideThinkingOrb);
                 chatArea.innerHTML = '';
             }, 700);
 
@@ -507,7 +508,7 @@
             
             // Setup empty AI Response Node & Trigger Streaming Handler
             const aiNodes = appendAIMessage();
-            handleAIResponse(text, aiNodes.statusNode, aiNodes.contentNode, requestHistory, requestConversationId);
+            handleAIResponse(text, aiNodes.statusNode, aiNodes.contentNode, aiNodes.orbHost, requestHistory, requestConversationId);
         }
 
         // Send Button Click
@@ -537,12 +538,12 @@
             msgDiv.className = `flex w-full animate-fade-in-up justify-start`;
             
             const innerDiv = document.createElement('div');
-            innerDiv.className = 'max-w-[85%] text-gray-200 text-sm font-light leading-relaxed w-full';
+            innerDiv.className = 'flex w-full max-w-[85%] items-start gap-2 text-gray-200 text-sm font-light leading-relaxed';
             innerDiv.innerHTML = `
-                <div class="w-full space-y-2">
-                    <!-- Plain-text activity label replaces the avatar and spinner. -->
-                    <div class="ai-status min-h-6 flex items-center gap-2" style="display:none;" aria-live="polite">
-                        <span class="thinking-orb-host" aria-hidden="true"></span>
+                <span class="thinking-orb-host mt-0.5" aria-hidden="true"></span>
+                <div class="min-w-0 flex-1 space-y-2">
+                    <!-- Plain-text activity label sits beside the orb while generating. -->
+                    <div class="ai-status min-h-6 flex items-center" style="display:none;" aria-live="polite">
                         <span class="status-text shimmer"></span>
                     </div>
                     <!-- Final text content container -->
@@ -556,15 +557,15 @@
 
             return {
                 statusNode: msgDiv.querySelector('.ai-status'),
+                orbHost: msgDiv.querySelector('.thinking-orb-host'),
                 statusTextNode: msgDiv.querySelector('.status-text'),
                 contentNode: msgDiv.querySelector('.ai-content')
             };
         }
 
         // Send the user's message and recent conversation to the real AI backend.
-        async function handleAIResponse(prompt, statusContainer, contentNode, history, requestConversationId) {
+        async function handleAIResponse(prompt, statusContainer, contentNode, thinkingOrbHost, history, requestConversationId) {
             const statusTextNode = statusContainer.querySelector('.status-text');
-            const thinkingOrbHost = statusContainer.querySelector('.thinking-orb-host');
             statusTextNode.textContent = 'Connecting';
             statusContainer.style.display = 'flex';
             showThinkingOrb(thinkingOrbHost, 'working');
@@ -593,7 +594,7 @@
                     reply = typeof data.reply === 'string' ? data.reply.trim() : '';
                     contentNode.textContent = reply;
                     statusContainer.style.display = 'none';
-                    hideThinkingOrb(thinkingOrbHost);
+                    showThinkingOrb(thinkingOrbHost, 'breathing');
                 } else if (contentType.includes('text/event-stream') && response.body) {
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
@@ -610,7 +611,7 @@
                             if (requestConversationId !== conversationId) return;
                             reply += data.token;
                             statusContainer.style.display = 'none';
-                            hideThinkingOrb(thinkingOrbHost);
+                            showThinkingOrb(thinkingOrbHost, 'breathing');
                             contentNode.textContent += data.token;
                             chatArea.scrollTop = chatArea.scrollHeight;
                         }
@@ -639,10 +640,9 @@
                 if (requestConversationId !== conversationId) return;
                 console.error('AI chat request failed:', error);
                 statusContainer.style.display = 'none';
-                hideThinkingOrb(thinkingOrbHost);
+                showThinkingOrb(thinkingOrbHost, 'breathing');
                 contentNode.textContent = `I couldn't get an AI response: ${error.message}`;
             } finally {
-                hideThinkingOrb(thinkingOrbHost);
                 if (requestConversationId === conversationId) {
                     messageInput.disabled = false;
                     sendBtn.disabled = false;
