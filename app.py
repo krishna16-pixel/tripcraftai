@@ -135,7 +135,9 @@ chat_llm = _build_llm(
     max_tokens=GLM_CHAT_MAX_TOKENS,
     timeout=GLM_CHAT_TIMEOUT_SECONDS,
     max_retries=0,
-    extra_body={"reasoning_effort": GLM_CHAT_REASONING_EFFORT, "clear_thinking": True},
+    # NVIDIA's hosted endpoint rejects `clear_thinking`; send only the
+    # supported reasoning-effort option so chat requests are accepted.
+    extra_body={"reasoning_effort": GLM_CHAT_REASONING_EFFORT},
 )
 
 # --------------------------------------------------------------------------
