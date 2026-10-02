@@ -210,7 +210,9 @@
     <script>
         // Backend API base URL — hardcoded here in code, not exposed as a UI input.
         // Change this value to point at your deployed backend.
-        const BACKEND_URL = "https://tripcraftai-8lnh.onrender.com";
+        const BACKEND_URL = window.location.protocol === 'file:'
+            ? 'http://localhost:8000'
+            : window.location.origin;
 
         // Initialize Lucide icons
         lucide.createIcons();
@@ -230,6 +232,8 @@
         const inputSectionContainer = document.getElementById('inputSectionContainer');
         const mainInputContainer = document.getElementById('mainInputContainer');
         let isChatActive = false;
+        const chatHistory = [];
+        let conversationId = 0;
 
         // Sidebar Elements
         const sidebar = document.getElementById('sidebar');
@@ -257,6 +261,10 @@
             if (!isChatActive) return; // Do nothing if already on a fresh screen
             
             isChatActive = false;
+            conversationId++;
+            chatHistory.length = 0;
+            messageInput.disabled = false;
+            sendBtn.disabled = false;
 
             // Fade out chat area
             chatArea.classList.remove('opacity-100');
@@ -386,6 +394,9 @@
 
             // Add User Message
             appendUserMessage(text);
+            const requestHistory = chatHistory.slice(-20);
+            const requestConversationId = conversationId;
+            chatHistory.push({ role: 'user', content: text });
             
             // Reset input state immediately
             messageInput.value = '';
@@ -408,7 +419,7 @@
             
             // Setup empty AI Response Node & Trigger Streaming Handler
             const aiNodes = appendAIMessage();
-            handleSSEStream(text, aiNodes.statusNode, aiNodes.contentNode);
+            handleAIResponse(text, aiNodes.statusNode, aiNodes.contentNode, requestHistory, requestConversationId);
         }
 
         // Send Button Click
@@ -469,70 +480,52 @@
             };
         }
 
-        // Simulated SSE (Server-Sent Events) Handler
-        function handleSSEStream(prompt, statusContainer, contentNode) {
-            /*
-             * The real backend now emits these phases for real (app.py,
-             * GET /trips/{job_id}/stream) -- each one is pushed at the
-             * moment that actual step starts, not on a timer:
-             *   architecting   -- building the research agent + tools
-             *   orchestrating  -- coordinating this planning pass
-             *   searching      -- agent is calling the web_search tool
-             *   mapping        -- agent is calling the estimate_route (geocoding) tool
-             *   wandering      -- agent is calling another tool (time/fetch/public_apis)
-             *   perambulating  -- agent's LLM is reasoning about its next step
-             *   plotting       -- building the day-by-day itinerary
-             *   calculating    -- checking dates/budget/daily schedule
-             *   navigating     -- checking city-to-city transfers
-             *   dilly dallying -- validation failed, looping back for another pass
-             *
-             * To wire this panel up for real:
-             *   const { job_id } = await fetch(BACKEND_URL + '/trips', {
-             *     method: 'POST', headers: {'Content-Type': 'application/json'},
-             *     body: JSON.stringify(tripRequest)   // structured trip fields, not free text
-             *   }).then(r => r.json());
-             *   const sse = new EventSource(BACKEND_URL + '/trips/' + job_id + '/stream');
-             *   sse.addEventListener('status', (e) => updateStatus(JSON.parse(e.data).phase));
-             *   // a 'result' event carries the finished itinerary just before the stream closes
-             *   sse.addEventListener('done', (e) => sse.close());
-             */
-
-            // Simulation of the real reasoning phases, in the order they actually fire
-            const phases = ['Architecting', 'Orchestrating', 'Searching', 'Mapping', 'Wandering', 'Perambulating', 'Plotting', 'Calculating', 'Navigating', 'Dilly dallying'];
-            let currentPhase = 0;
-            
-            statusContainer.style.display = 'flex';
+        // Send the user's message and recent conversation to the real AI backend.
+        async function handleAIResponse(prompt, statusContainer, contentNode, history, requestConversationId) {
             const statusTextNode = statusContainer.querySelector('.status-text');
-            
-            // Loop through reasoning phases (updates every 700ms)
-            const thinkingInterval = setInterval(() => {
-                if (currentPhase < phases.length) {
-                    statusTextNode.textContent = phases[currentPhase] + '...';
-                    chatArea.scrollTop = chatArea.scrollHeight;
-                    currentPhase++;
-                } else {
-                    clearInterval(thinkingInterval);
-                    
-                    // Hide reasoning indicator when finished
-                    statusContainer.style.display = 'none';
-                    
-                    // Simulate standard streaming response
-                    const response = "This is a streamed response provided by the simulated SSE handler. After successfully traversing the deep reasoning phases, the AI determined that the best way to respond to your prompt was to stream this text token-by-token for a fluid, real-time feel.";
-                    const tokens = response.split(' ');
-                    let tokenIdx = 0;
-                    
-                    // Append tokens every 50ms
-                    const streamInterval = setInterval(() => {
-                        if (tokenIdx < tokens.length) {
-                            contentNode.innerHTML += tokens[tokenIdx] + ' ';
-                            chatArea.scrollTop = chatArea.scrollHeight;
-                            tokenIdx++;
-                        } else {
-                            clearInterval(streamInterval);
-                        }
-                    }, 50); 
+            statusTextNode.textContent = 'Thinking...';
+            statusContainer.style.display = 'flex';
+            messageInput.disabled = true;
+            sendBtn.disabled = true;
+
+            try {
+                const response = await fetch(`${BACKEND_URL}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: prompt, history })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(data.detail || `AI request failed (${response.status}).`);
                 }
-            }, 700); 
+
+                const reply = typeof data.reply === 'string' ? data.reply.trim() : '';
+                if (!reply) throw new Error('The AI returned an empty response. Please try again.');
+                if (requestConversationId !== conversationId) return;
+
+                chatHistory.push({ role: 'assistant', content: reply });
+                statusContainer.style.display = 'none';
+
+                // Reveal the real response gradually without inserting HTML from the model.
+                const chunks = reply.split(/(\s+)/).filter(Boolean);
+                for (let i = 0; i < chunks.length && requestConversationId === conversationId; i++) {
+                    contentNode.textContent += chunks[i];
+                    if (i % 5 === 0) {
+                        chatArea.scrollTop = chatArea.scrollHeight;
+                        await new Promise(resolve => setTimeout(resolve, 18));
+                    }
+                }
+            } catch (error) {
+                if (requestConversationId !== conversationId) return;
+                console.error('AI chat request failed:', error);
+                statusContainer.style.display = 'none';
+                contentNode.textContent = `I couldn't get an AI response: ${error.message}`;
+            } finally {
+                if (requestConversationId === conversationId) {
+                    messageInput.disabled = false;
+                    sendBtn.disabled = false;
+                }
+            }
         }
 
         // Enter Key to Send

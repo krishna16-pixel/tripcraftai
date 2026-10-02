@@ -51,7 +51,7 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -451,6 +451,16 @@ class TripRequest(TripConstraints):
     max_iterations: int = Field(default=4, ge=1, le=8)
 
 
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=5000)
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=5000)
+    history: List[ChatTurn] = Field(default_factory=list)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "model": GLM_MODEL, "vision_model": GLM_VISION_MODEL}
@@ -461,6 +471,55 @@ async def frontend():
     """Serve the single-page frontend from the same Render web service."""
     index_file = Path(_THIS_DIR) / "frontend" / "index.html"
     return FileResponse(index_file, media_type="text/html")
+
+
+@app.post("/chat")
+async def chat(request: ChatRequest):
+    """Answer a free-form travel question with the configured chat model."""
+    if not NVIDIA_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="AI chat is not configured. Add NVIDIA_API_KEY to the Render service environment.",
+        )
+
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    messages = [SystemMessage(content=(
+        "You are TripCraft, a helpful AI travel-planning assistant. Respond to the "
+        "user's actual message, be concise and friendly, and ask a focused "
+        "follow-up question when important trip details are missing. Help gather "
+        "origin, destination, dates, budget, traveler count, and preferences. "
+        "This chat endpoint has no live research tools, so do not claim to have "
+        "verified current prices, schedules, opening hours, or bookings."
+    ))]
+    for turn in request.history[-20:]:
+        if turn.role == "user":
+            messages.append(HumanMessage(content=turn.content))
+        else:
+            messages.append(AIMessage(content=turn.content))
+    messages.append(HumanMessage(content=request.message))
+
+    try:
+        result = await llm.ainvoke(messages)
+    except Exception as exc:
+        logger.exception("AI chat request failed")
+        raise HTTPException(
+            status_code=502,
+            detail="The AI request failed. Check NVIDIA_API_KEY and the model configuration in Render.",
+        ) from exc
+
+    reply = result.content
+    if isinstance(reply, list):
+        reply = "\n".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in reply
+        )
+    if not isinstance(reply, str):
+        reply = str(reply)
+    reply = reply.strip()
+    if not reply:
+        raise HTTPException(status_code=502, detail="The AI returned an empty response.")
+    return {"reply": reply}
 
 
 # ---- uploads --------------------------------------------------------------
