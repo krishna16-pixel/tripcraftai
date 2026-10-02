@@ -179,7 +179,7 @@
                         id="messageInput"
                         rows="1"
                         class="w-full bg-transparent text-white border-none py-1.5 text-base font-light outline-none resize-none placeholder:text-[#555] focus:placeholder:text-[#888] leading-relaxed max-h-44"
-                        placeholder="Ask Gemini..."
+                        placeholder=""
                         spellcheck="false"
                     ></textarea>
                 </div>
@@ -540,6 +540,51 @@
                 submitMessage();
             }
         });
+
+        // ---- Typing animation for the empty input box's placeholder ----
+        const placeholderPhrases = [
+            'plan my trip....',
+            'give me a destination?',
+            'start anywhere....',
+            'find my perfect escape..'
+        ];
+        let phIndex = 0;      // which phrase we're on
+        let phCharIndex = 0;  // how many characters of it are "typed"
+        let phDeleting = false;
+        let phTimer = null;
+
+        function typePlaceholder() {
+            // Box has real content (standard state only) -- just wait, don't animate over it
+            if (messageInput.value.length > 0) {
+                phTimer = setTimeout(typePlaceholder, 400);
+                return;
+            }
+
+            const phrase = placeholderPhrases[phIndex];
+            let delay;
+
+            if (!phDeleting) {
+                phCharIndex++;
+                delay = 65; // typing speed
+                if (phCharIndex === phrase.length) {
+                    phDeleting = true;
+                    delay = 1400; // hold the full phrase before deleting
+                }
+            } else {
+                phCharIndex--;
+                delay = 32; // deleting is a bit faster than typing
+                if (phCharIndex === 0) {
+                    phDeleting = false;
+                    phIndex = (phIndex + 1) % placeholderPhrases.length;
+                    delay = 350; // brief pause before the next phrase starts
+                }
+            }
+
+            messageInput.setAttribute('placeholder', phrase.slice(0, phCharIndex) + (phCharIndex > 0 ? '|' : ''));
+            phTimer = setTimeout(typePlaceholder, delay);
+        }
+
+        typePlaceholder();
     </script>
 </body>
 </html>
