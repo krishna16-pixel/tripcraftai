@@ -456,7 +456,7 @@ async def health():
     return {"status": "ok", "model": GLM_MODEL, "vision_model": GLM_VISION_MODEL}
 
 
-@app.get("/", include_in_schema=False)
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 async def frontend():
     """Serve the single-page frontend from the same Render web service."""
     index_file = Path(_THIS_DIR) / "frontend" / "index.html"
