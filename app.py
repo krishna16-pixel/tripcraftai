@@ -40,8 +40,10 @@ pointed at NVIDIA's base URL instead of OpenAI's or Z.ai's own endpoint.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib.util
+import json
 import logging
 import mimetypes
 import os
@@ -53,7 +55,8 @@ from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 load_dotenv()
@@ -184,6 +187,56 @@ def _extract_file_text(path: Path, content_type: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# Live status events (SSE)
+# --------------------------------------------------------------------------
+# One asyncio.Queue per in-flight job. plan_trip() and everything it calls
+# push an event here *at the moment that real step actually starts* -- these
+# are not simulated/timed phases, they're emitted from inside the real
+# research-agent callbacks and the real validators. GET /trips/{job_id}/stream
+# drains this queue and relays each event to the browser as SSE.
+#
+# Each status phase corresponds to one real backend action:
+#   architecting    -- building the research agent (tools + prompt), once per process
+#   orchestrating   -- plan_trip coordinating this iteration across cities/days
+#   searching       -- the agent is calling the web_search tool
+#   mapping         -- the agent is calling the estimate_route (geocoding) tool
+#   wandering       -- the agent is calling any other tool (MCP time/fetch/public_apis)
+#   perambulating   -- the agent's LLM is reasoning about what to do next
+#   plotting        -- draft_phase: the structured LLM is building the day-by-day itinerary
+#   calculating     -- validate_itinerary: checking dates/budget/daily schedule
+#   navigating      -- validate_itinerary: checking city-to-city transfer feasibility
+#   dilly dallying  -- validation failed; looping back for another research+draft pass
+job_queues: Dict[str, "asyncio.Queue"] = {}
+
+
+async def _emit(job_id: Optional[str], phase: str, detail: str = "") -> None:
+    """Push a live status event from async code (plan_trip, research_phase, draft_phase)."""
+    if not job_id:
+        return
+    queue = job_queues.get(job_id)
+    if queue is None:
+        return
+    await queue.put({"phase": phase, "detail": detail, "ts": datetime.utcnow().isoformat()})
+
+
+def _emit_sync(job_id: Optional[str], phase: str, detail: str = "") -> None:
+    """Push a live status event from sync code (the validators, via on_phase)."""
+    if not job_id:
+        return
+    queue = job_queues.get(job_id)
+    if queue is None:
+        return
+    try:
+        queue.put_nowait({"phase": phase, "detail": detail, "ts": datetime.utcnow().isoformat()})
+    except asyncio.QueueFull:  # pragma: no cover -- unbounded queue, shouldn't happen
+        logger.warning("Status queue full for job %s; dropping '%s' event", job_id, phase)
+
+
+def _sse_format(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+# --------------------------------------------------------------------------
 # Research agent: web search + route estimator + any configured MCP tools
 # --------------------------------------------------------------------------
 
@@ -219,10 +272,49 @@ async def _get_research_agent():
     return _agent_executor
 
 
+_PhaseStatusCallbackCls = None
+
+
+def _get_phase_callback_cls():
+    """Lazily build the callback class (same lazy-import style as
+    _get_research_agent above) -- a LangChain callback handler that turns
+    the research agent's *real* tool calls and reasoning steps into live
+    status events, fed straight from AgentExecutor's own callback hooks."""
+    global _PhaseStatusCallbackCls
+    if _PhaseStatusCallbackCls is not None:
+        return _PhaseStatusCallbackCls
+
+    from langchain_core.callbacks import AsyncCallbackHandler
+
+    class PhaseStatusCallback(AsyncCallbackHandler):
+        def __init__(self, job_id: Optional[str]):
+            self.job_id = job_id
+
+        async def on_chat_model_start(self, serialized, messages, **kwargs) -> None:
+            await _emit(self.job_id, "perambulating", "Agent is deciding its next research step")
+
+        async def on_llm_start(self, serialized, prompts, **kwargs) -> None:
+            await _emit(self.job_id, "perambulating", "Agent is deciding its next research step")
+
+        async def on_tool_start(self, serialized, input_str, **kwargs) -> None:
+            name = (serialized or {}).get("name", "")
+            query = (input_str or "")[:140]
+            if name == "web_search":
+                await _emit(self.job_id, "searching", query)
+            elif name == "estimate_route":
+                await _emit(self.job_id, "mapping", query)
+            else:
+                await _emit(self.job_id, "wandering", f"{name}: {query}" if name else query)
+
+    _PhaseStatusCallbackCls = PhaseStatusCallback
+    return _PhaseStatusCallbackCls
+
+
 async def research_phase(
     constraints: TripConstraints,
     attachment_context: str,
     feedback: Optional[List[str]] = None,
+    job_id: Optional[str] = None,
 ) -> str:
     agent = await _get_research_agent()
     feedback_block = ""
@@ -236,7 +328,11 @@ async def research_phase(
         f"{('Attachment context:\\n' + attachment_context) if attachment_context else ''}"
         f"{feedback_block}"
     )
-    result = await agent.ainvoke({"input": task})
+    config = None
+    if job_id:
+        callback_cls = _get_phase_callback_cls()
+        config = {"callbacks": [callback_cls(job_id)]}
+    result = await agent.ainvoke({"input": task}, config=config)
     return result.get("output", "")
 
 
@@ -245,7 +341,9 @@ async def draft_phase(
     research_notes: str,
     attachment_context: str,
     feedback: Optional[List[str]] = None,
+    job_id: Optional[str] = None,
 ) -> Itinerary:
+    await _emit(job_id, "plotting", "Assembling the day-by-day itinerary")
     structured_llm = llm.with_structured_output(Itinerary)
     feedback_block = ""
     if feedback:
@@ -281,15 +379,28 @@ def _attachment_context(attachment_ids: List[str]) -> str:
     return "\n".join(parts)
 
 
-async def plan_trip(constraints: TripConstraints, max_iterations: int = 4) -> dict:
+async def plan_trip(constraints: TripConstraints, max_iterations: int = 4, job_id: Optional[str] = None) -> dict:
     attachment_context = _attachment_context(constraints.attachment_ids)
     history = []
     feedback: Optional[List[str]] = None
 
+    if _agent_executor is None:
+        await _emit(job_id, "architecting", "Building the research agent and its tools")
+    await _emit(
+        job_id, "orchestrating",
+        f"Coordinating a {constraints.trip_days}-day trip across {len(constraints.destinations)} cit"
+        f"{'y' if len(constraints.destinations) == 1 else 'ies'}",
+    )
+
     for i in range(1, max_iterations + 1):
-        notes = await research_phase(constraints, attachment_context, feedback)
-        itinerary = await draft_phase(constraints, notes, attachment_context, feedback)
-        report: ValidationReport = validate_itinerary(itinerary, constraints)
+        if i > 1:
+            await _emit(job_id, "dilly dallying", f"Draft {i - 1} didn't pass validation -- taking another pass")
+        notes = await research_phase(constraints, attachment_context, feedback, job_id=job_id)
+        itinerary = await draft_phase(constraints, notes, attachment_context, feedback, job_id=job_id)
+        report: ValidationReport = validate_itinerary(
+            itinerary, constraints,
+            on_phase=(lambda phase, detail="", _jid=job_id: _emit_sync(_jid, phase, detail)),
+        )
         history.append({
             "iteration": i,
             "is_valid": report.is_valid,
@@ -322,6 +433,16 @@ async def plan_trip(constraints: TripConstraints, max_iterations: int = 4) -> di
 # --------------------------------------------------------------------------
 
 app = FastAPI(title="Multi-City Trip Planning Agent", version="1.0.0")
+
+# Permissive by default so the static frontend (any origin/file://) can open
+# the SSE stream below. Tighten allow_origins to your real frontend's origin
+# before deploying this anywhere public.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 jobs: Dict[str, dict] = {}  # job_id -> {status, result, error}
 
@@ -395,24 +516,57 @@ async def list_uploads():
 
 @app.post("/trips")
 async def create_trip(request: TripRequest):
-    """Kick off planning in the background; poll GET /trips/{job_id}."""
+    """Kick off planning in the background; poll GET /trips/{job_id}, or
+    watch it live via GET /trips/{job_id}/stream."""
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "running", "result": None, "error": None}
+    job_queues[job_id] = asyncio.Queue()
 
     constraints = TripConstraints(**request.model_dump(exclude={"max_iterations"}))
 
-    import asyncio
-
     async def _run():
         try:
-            result = await plan_trip(constraints, max_iterations=request.max_iterations)
+            result = await plan_trip(constraints, max_iterations=request.max_iterations, job_id=job_id)
             jobs[job_id] = {"status": "done", "result": result, "error": None}
+            await job_queues[job_id].put({"phase": "done", "detail": "", "ts": datetime.utcnow().isoformat()})
         except Exception as exc:  # pragma: no cover
             logger.exception("Trip planning failed")
             jobs[job_id] = {"status": "failed", "result": None, "error": str(exc)}
+            await job_queues[job_id].put({"phase": "failed", "detail": str(exc), "ts": datetime.utcnow().isoformat()})
+        finally:
+            await job_queues[job_id].put(None)  # sentinel: tells the SSE stream to close
 
     asyncio.create_task(_run())
     return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/trips/{job_id}/stream")
+async def stream_trip(job_id: str):
+    """Real SSE endpoint: relays the live status events plan_trip() is
+    actually emitting for this job (see the job_queues block above), then
+    sends one final 'result' event with the job's outcome and closes."""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    async def event_generator():
+        queue = job_queues.get(job_id)
+        if queue is None:
+            yield _sse_format("error", {"detail": "No live stream for this job."})
+            return
+        while True:
+            item = await queue.get()
+            if item is None:  # sentinel -- the background job is finished
+                break
+            event_name = "done" if item.get("phase") in ("done", "failed") else "status"
+            yield _sse_format(event_name, item)
+        job = jobs.get(job_id, {})
+        yield _sse_format("result", job)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/trips/{job_id}")
