@@ -53,6 +53,25 @@
         .animate-fade-in-up {
             animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
+
+        /* Shimmer sweep for the live SSE status label (replaces the plain pulse) */
+        @keyframes shimmerSweep {
+            0%   { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+        .status-text.shimmer {
+            background-image: linear-gradient(
+                90deg,
+                #888 0%, #888 35%,
+                #fff 50%,
+                #888 65%, #888 100%
+            );
+            background-size: 200% 100%;
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            animation: shimmerSweep 1.6s linear infinite;
+        }
     </style>
 </head>
 <body class="h-screen w-screen overflow-hidden flex bg-[#030303] text-white">
@@ -189,6 +208,10 @@
     </div> <!-- Close mainContent wrapper -->
 
     <script>
+        // Backend API base URL — hardcoded here in code, not exposed as a UI input.
+        // Change this value to point at your deployed backend.
+        const BACKEND_URL = "http://localhost:8000";
+
         // Initialize Lucide icons
         lucide.createIcons();
 
@@ -421,9 +444,9 @@
                     </div>
                     <div class="pt-1.5 space-y-2 flex-1">
                         <!-- Streaming Status Container -->
-                        <div class="ai-status text-xs font-mono text-[#888] italic animate-pulse flex items-center gap-2" style="display:none;">
-                            <i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i>
-                            <span class="status-text"></span>
+                        <div class="ai-status text-xs font-mono italic flex items-center gap-2" style="display:none;">
+                            <i data-lucide="loader-2" class="w-3 h-3 animate-spin text-[#888]"></i>
+                            <span class="status-text shimmer"></span>
                         </div>
                         <!-- Final Text Content Container -->
                         <div class="ai-content leading-relaxed"></div>
@@ -446,16 +469,34 @@
 
         // Simulated SSE (Server-Sent Events) Handler
         function handleSSEStream(prompt, statusContainer, contentNode) {
-            /* 
-             * To connect to a real backend, you would use:
-             * const sse = new EventSource('/api/chat/stream?q=' + encodeURIComponent(prompt));
-             * sse.addEventListener('status', (e) => updateStatus(e.data));
-             * sse.addEventListener('token', (e) => appendToken(e.data));
-             * sse.addEventListener('done', () => sse.close());
+            /*
+             * The real backend now emits these phases for real (app.py,
+             * GET /trips/{job_id}/stream) -- each one is pushed at the
+             * moment that actual step starts, not on a timer:
+             *   architecting   -- building the research agent + tools
+             *   orchestrating  -- coordinating this planning pass
+             *   searching      -- agent is calling the web_search tool
+             *   mapping        -- agent is calling the estimate_route (geocoding) tool
+             *   wandering      -- agent is calling another tool (time/fetch/public_apis)
+             *   perambulating  -- agent's LLM is reasoning about its next step
+             *   plotting       -- building the day-by-day itinerary
+             *   calculating    -- checking dates/budget/daily schedule
+             *   navigating     -- checking city-to-city transfers
+             *   dilly dallying -- validation failed, looping back for another pass
+             *
+             * To wire this panel up for real:
+             *   const { job_id } = await fetch(BACKEND_URL + '/trips', {
+             *     method: 'POST', headers: {'Content-Type': 'application/json'},
+             *     body: JSON.stringify(tripRequest)   // structured trip fields, not free text
+             *   }).then(r => r.json());
+             *   const sse = new EventSource(BACKEND_URL + '/trips/' + job_id + '/stream');
+             *   sse.addEventListener('status', (e) => updateStatus(JSON.parse(e.data).phase));
+             *   // a 'result' event carries the finished itinerary just before the stream closes
+             *   sse.addEventListener('done', (e) => sse.close());
              */
 
-            // Simulation of deep reasoning phases
-            const phases = ['Searching', 'Planning', 'Thinking', 'Solving', 'Shaping', 'Fathoming'];
+            // Simulation of the real reasoning phases, in the order they actually fire
+            const phases = ['Architecting', 'Orchestrating', 'Searching', 'Mapping', 'Wandering', 'Perambulating', 'Plotting', 'Calculating', 'Navigating', 'Dilly dallying'];
             let currentPhase = 0;
             
             statusContainer.style.display = 'flex';
