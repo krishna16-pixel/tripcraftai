@@ -281,6 +281,8 @@
             if (isSidebarOpen) {
                 toggleSidebar();
             }
+
+            startPlaceholderAnimation();
         }
 
         newChatBtn.addEventListener('click', resetChat);
@@ -552,11 +554,38 @@
         let phCharIndex = 0;  // how many characters of it are "typed"
         let phDeleting = false;
         let phTimer = null;
+        let placeholderAnimationStopped = false;
+
+        function stopPlaceholderAnimation() {
+            placeholderAnimationStopped = true;
+            if (phTimer !== null) {
+                clearTimeout(phTimer);
+                phTimer = null;
+            }
+            messageInput.setAttribute('placeholder', '');
+        }
+
+        function startPlaceholderAnimation() {
+            if (isChatActive || document.activeElement === messageInput) return;
+
+            if (phTimer !== null) clearTimeout(phTimer);
+            placeholderAnimationStopped = false;
+            phIndex = 0;
+            phCharIndex = 0;
+            phDeleting = false;
+            messageInput.setAttribute('placeholder', '');
+            typePlaceholder();
+        }
+
+        messageInput.addEventListener('focus', stopPlaceholderAnimation);
 
         function typePlaceholder() {
-            // Box has real content (standard state only) -- just wait, don't animate over it
+            // Animate only on the fresh-chat screen, and never while the user
+            // is interacting with the input.
+            if (placeholderAnimationStopped || isChatActive || document.activeElement === messageInput) return;
+
             if (messageInput.value.length > 0) {
-                phTimer = setTimeout(typePlaceholder, 400);
+                stopPlaceholderAnimation();
                 return;
             }
 
@@ -584,7 +613,7 @@
             phTimer = setTimeout(typePlaceholder, delay);
         }
 
-        typePlaceholder();
+        startPlaceholderAnimation();
     </script>
 </body>
 </html>
