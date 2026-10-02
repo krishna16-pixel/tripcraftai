@@ -27,7 +27,7 @@ import os
 import sys
 from datetime import date, datetime, time, timedelta
 from enum import Enum
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -628,12 +628,25 @@ def validate_routes(itinerary: Itinerary, constraints: TripConstraints) -> List[
     return issues
 
 
-def validate_itinerary(itinerary: Itinerary, constraints: TripConstraints) -> ValidationReport:
+def validate_itinerary(
+    itinerary: Itinerary,
+    constraints: TripConstraints,
+    on_phase: Optional[Callable[[str, str], None]] = None,
+) -> ValidationReport:
+    """Run every validator. If `on_phase(phase, detail)` is given, it's
+    called synchronously right before each real group of checks begins --
+    callers (app.py) use this to push live SSE status updates, so the
+    phases below must stay truthful to what actually runs next."""
+    if on_phase:
+        on_phase("calculating", "Checking dates, budget, and the daily schedule")
     issues: List[ValidationIssue] = []
     issues += validate_dates(itinerary, constraints)
     issues += validate_budget(itinerary, constraints)
     issues += validate_daily_schedule(itinerary, constraints)
     issues += validate_opening_hours(itinerary)
+
+    if on_phase:
+        on_phase("navigating", "Checking city-to-city transfers are realistic")
     issues += validate_routes(itinerary, constraints)
 
     computed_total = sum(
