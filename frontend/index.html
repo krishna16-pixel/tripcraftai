@@ -361,6 +361,7 @@
         let isChatActive = false;
         const chatHistory = [];
         let conversationId = 0;
+        let tripIntakePending = false;
 
         // Sidebar Elements
         const sidebar = document.getElementById('sidebar');
@@ -390,6 +391,7 @@
             isChatActive = false;
             conversationId++;
             chatHistory.length = 0;
+            tripIntakePending = false;
             messageInput.disabled = false;
             sendBtn.disabled = false;
 
@@ -602,26 +604,139 @@
             };
         }
 
+        function isTripPlanningRequest(message) {
+            const text = String(message || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            if (isTripPlanningCancellation(text)) return false;
+            const actionBeforeTrip = /\b(?:plan|planning|create|build|make|organize|draft|design)\b.{0,60}\b(?:trip|travel|itinerary|vacation|holiday)\b/.test(text);
+            const tripBeforeAction = /\b(?:trip|travel|itinerary|vacation|holiday)\b.{0,60}\b(?:plan|planning|create|build|make|organize|draft)\b/.test(text);
+            const itineraryRequest = /\b(?:\d+\s*[- ]day\s+)?itinerary\s+(?:for|to|in|around)\b/.test(text);
+            const durationPlan = /\b(?:plan|create|build|make|organize|draft)\b.{0,50}\b(?:\d+\s*(?:day|night)s?|weekend)\b.{0,50}\b(?:in|to|around)\b/.test(text);
+            return actionBeforeTrip || tripBeforeAction || itineraryRequest || durationPlan;
+        }
+
+        function isTripPlanningCancellation(message) {
+            return /\b(?:cancel|stop|never mind|nevermind|forget it|skip it|don't(?: want to)? plan|do not(?: want to)? plan|rather not plan)\b/i.test(String(message || ''));
+        }
+
+        async function streamTripJob(jobId, statusContainer, statusTextNode, thinkingOrbHost, requestConversationId) {
+            const response = await fetch(`${BACKEND_URL}/trips/${encodeURIComponent(jobId)}/stream`, {
+                headers: { 'Accept': 'text/event-stream' }
+            });
+            if (!response.ok || !response.body) {
+                const data = await response.json().catch(() => ({}));
+                throw new Error(data.detail || `Trip planner stream failed (${response.status}).`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let jobResult = null;
+
+            const processEvent = (event) => {
+                const lines = event.split(/\r?\n/);
+                const eventName = lines.find(line => line.startsWith('event:'))?.slice(6).trim() || '';
+                const rawData = lines.filter(line => line.startsWith('data:'))
+                    .map(line => line.slice(5).trim()).join('\n');
+                if (!rawData) return;
+                const data = JSON.parse(rawData);
+
+                if (eventName === 'error') {
+                    throw new Error(data.detail || 'The trip-planning stream failed.');
+                }
+                if (eventName === 'result') {
+                    jobResult = data;
+                    return;
+                }
+                if (data.phase && requestConversationId === conversationId) {
+                    const phaseLabel = data.detail || data.phase.replace(/\b\w/g, letter => letter.toUpperCase());
+                    statusTextNode.textContent = phaseLabel || 'Planning your trip';
+                    statusContainer.style.display = 'flex';
+                    setOrbForBackendStatus(thinkingOrbHost, data.phase);
+                    chatArea.scrollTop = chatArea.scrollHeight;
+                }
+            };
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (value) buffer += decoder.decode(value, { stream: true });
+                if (done) buffer += decoder.decode();
+                const events = buffer.split(/\r?\n\r?\n/);
+                buffer = events.pop() || '';
+                for (const event of events) processEvent(event);
+                if (done) {
+                    if (buffer.trim()) processEvent(buffer);
+                    break;
+                }
+            }
+
+            if (!jobResult) throw new Error('The trip planner stream closed without a result.');
+            if (jobResult.status !== 'done') {
+                throw new Error(jobResult.error || 'Trip planning did not complete.');
+            }
+            statusContainer.style.display = 'none';
+            showThinkingOrb(thinkingOrbHost, 'breathing');
+            return jobResult;
+        }
+
+        function formatTripPlannerReply(job, assumptions = []) {
+            const plan = job?.result || {};
+            const itinerary = plan.itinerary;
+            if (!itinerary) return 'The trip planner finished, but did not return an itinerary.';
+
+            const lines = [itinerary.trip_title || 'Your trip itinerary'];
+            if (assumptions.length) lines.push(`Assumptions: ${assumptions.join('; ')}.`);
+            if (itinerary.summary) lines.push(itinerary.summary);
+
+            (itinerary.days || []).forEach((day, index) => {
+                lines.push(`\n${day.date || `Day ${index + 1}`} — ${day.city || 'Destination'}`);
+                if (day.transfer) {
+                    const transfer = day.transfer;
+                    lines.push(`  Transfer: ${transfer.from_city} → ${transfer.to_city} by ${transfer.mode}, ${String(transfer.depart_time || '').slice(0, 5)}–${String(transfer.arrive_time || '').slice(0, 5)}.`);
+                }
+                (day.activities || []).forEach(activity => {
+                    const time = `${String(activity.start_time || '').slice(0, 5)}–${String(activity.end_time || '').slice(0, 5)}`;
+                    const cost = Number(activity.estimated_cost || 0);
+                    lines.push(`  ${time}: ${activity.name}${cost > 0 ? ` (est. ${itinerary.currency || 'USD'} ${cost.toFixed(0)})` : ''}${activity.notes ? ` — ${activity.notes}` : ''}`);
+                });
+                if (Number(day.lodging_cost || 0) > 0) {
+                    lines.push(`  Lodging estimate: ${itinerary.currency || 'USD'} ${Number(day.lodging_cost).toFixed(0)}`);
+                }
+            });
+
+            lines.push(`\nEstimated total: ${itinerary.currency || 'USD'} ${Number(itinerary.total_estimated_cost || 0).toFixed(0)}.`);
+            const issues = plan.validation?.issues || [];
+            if (issues.length) lines.push(`Validation notes: ${issues.slice(0, 4).map(issue => issue.message).join(' ')}`);
+            if (plan.status === 'unresolved_after_max_iterations') {
+                lines.push('Some validation items may still need review.');
+            }
+            return lines.join('\n');
+        }
+
         // Send the user's message and recent conversation to the real AI backend.
         async function handleAIResponse(prompt, statusContainer, contentNode, thinkingOrbHost, history, requestConversationId) {
             const statusTextNode = statusContainer.querySelector('.status-text');
+            const cancelPendingTrip = tripIntakePending && isTripPlanningCancellation(prompt);
+            if (cancelPendingTrip) tripIntakePending = false;
+            const useTripJobFlow = !cancelPendingTrip && (tripIntakePending || isTripPlanningRequest(prompt));
             statusTextNode.textContent = 'Connecting';
             statusContainer.style.display = 'flex';
-            showThinkingOrb(thinkingOrbHost, 'connecting');
+            showThinkingOrb(thinkingOrbHost, useTripJobFlow ? 'working' : 'connecting');
             messageInput.disabled = true;
             sendBtn.disabled = true;
 
             try {
-                const response = await fetch(`${BACKEND_URL}/chat`, {
+                const endpoint = useTripJobFlow ? '/trips/from-chat' : '/chat';
+                const response = await fetch(`${BACKEND_URL}${endpoint}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: prompt, history })
                 });
-                statusTextNode.textContent = 'Thinking';
+                if (requestConversationId !== conversationId) return;
+                statusTextNode.textContent = useTripJobFlow ? 'Reading trip details' : 'Thinking';
                 if (!response.ok) {
                     const data = await response.json().catch(() => ({}));
                     const message = response.status === 404
-                        ? `Chat API not found at ${BACKEND_URL}/chat. Refresh the latest frontend and try again.`
+                        ? `${useTripJobFlow ? 'Trip planner' : 'Chat API'} not found at ${BACKEND_URL}${endpoint}. Refresh the latest frontend and try again.`
                         : (data.detail || `AI request failed (${response.status}).`);
                     throw new Error(message);
                 }
@@ -630,7 +745,27 @@
                 const contentType = response.headers.get('content-type') || '';
                 if (contentType.includes('application/json')) {
                     const data = await response.json();
-                    reply = typeof data.reply === 'string' ? data.reply.trim() : '';
+                    if (requestConversationId !== conversationId) return;
+                    if (useTripJobFlow) {
+                        if (data.status === 'clarification_required') {
+                            tripIntakePending = true;
+                            reply = typeof data.reply === 'string' ? data.reply.trim() : 'What city are you starting from, and where would you like to go?';
+                        } else if (data.job_id) {
+                            tripIntakePending = false;
+                            const assumptions = Array.isArray(data.assumptions) ? data.assumptions : [];
+                            statusTextNode.textContent = assumptions.length
+                                ? `Starting planner: ${assumptions.join('; ')}`
+                                : 'Starting trip planner';
+                            statusContainer.style.display = 'flex';
+                            setOrbForBackendStatus(thinkingOrbHost, 'orchestrating');
+                            const job = await streamTripJob(data.job_id, statusContainer, statusTextNode, thinkingOrbHost, requestConversationId);
+                            reply = formatTripPlannerReply(job, assumptions);
+                        } else {
+                            throw new Error(data.detail || 'The trip planner did not return a job.');
+                        }
+                    } else {
+                        reply = typeof data.reply === 'string' ? data.reply.trim() : '';
+                    }
                     contentNode.textContent = reply;
                     statusContainer.style.display = 'none';
                     showThinkingOrb(thinkingOrbHost, 'breathing');

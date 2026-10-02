@@ -55,7 +55,7 @@ import mimetypes
 import os
 import sys
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
@@ -508,6 +508,21 @@ class ChatRequest(BaseModel):
     history: List[ChatTurn] = Field(default_factory=list)
 
 
+class TripChatIntake(BaseModel):
+    """Trip details extracted from a natural-language chat request."""
+    origin_city: Optional[str] = None
+    destinations: List[CityStop] = Field(default_factory=list)
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    duration_days: Optional[int] = Field(default=None, ge=1, le=30)
+    total_budget: Optional[float] = Field(default=None, gt=0)
+    currency: Optional[str] = None
+    travelers: Optional[int] = Field(default=None, ge=1, le=20)
+    pace: Optional[str] = None
+    preferences: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
 @app.get("/health")
 async def health():
     return {
@@ -680,6 +695,114 @@ async def create_trip(request: TripRequest):
 
     asyncio.create_task(_run())
     return {"job_id": job_id, "status": "running"}
+
+
+@app.post("/trips/from-chat")
+async def create_trip_from_chat(request: ChatRequest):
+    """Extract constraints from chat, then start the same live trip job/stream.
+
+    Origin and destination are never guessed. Missing essential locations are
+    returned as a chat clarification; dates and budget use disclosed defaults.
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    today = date.today()
+    recent_history = [
+        {"role": turn.role, "content": turn.content}
+        for turn in request.history[-10:]
+    ]
+    extraction_prompt = (
+        "Extract a trip request into the provided structured fields. Use only details "
+        "stated in the current message or conversation history. Never invent an origin "
+        "city or destination; leave either missing if unclear. Resolve relative dates "
+        f"relative to today ({today.isoformat()}). Preserve the user's requested cities, "
+        "country, duration, traveler count, currency, budget, pace and interests. Leave "
+        "dates, duration and budget empty when absent; the server will apply and disclose "
+        "sensible defaults.\n\n"
+        f"Recent conversation: {json.dumps(recent_history, ensure_ascii=False)}\n\n"
+        f"Current trip request: {request.message}"
+    )
+    try:
+        intake = await agent_llm.with_structured_output(TripChatIntake).ainvoke([
+            SystemMessage(content="Extract trip details faithfully. Do not add unspecified locations."),
+            HumanMessage(content=extraction_prompt),
+        ])
+        if not isinstance(intake, TripChatIntake):
+            intake = TripChatIntake.model_validate(intake)
+    except Exception as exc:
+        logger.exception("Could not extract trip details from chat")
+        raise HTTPException(
+            status_code=502,
+            detail="I couldn't read the trip details yet. Please try again or tell me your starting city and destination.",
+        ) from exc
+
+    missing = []
+    if not intake.origin_city or not intake.origin_city.strip():
+        missing.append("starting city")
+    if not intake.destinations:
+        missing.append("destination")
+    if missing:
+        if len(missing) == 2:
+            reply = "What city are you starting from, and where would you like to go?"
+        elif missing[0] == "starting city":
+            reply = "What city will you be starting from?"
+        else:
+            reply = "Where would you like to go?"
+        return {"status": "clarification_required", "reply": reply, "missing": missing}
+
+    assumptions = []
+    start_date = intake.start_date
+    end_date = intake.end_date
+    duration_days = intake.duration_days
+    if start_date is None or end_date is None:
+        if duration_days is None:
+            duration_days = 3
+            assumptions.append("3-day duration default")
+        if start_date is None and end_date is None:
+            start_date = today + timedelta(days=14)
+            end_date = start_date + timedelta(days=duration_days - 1)
+            assumptions.append(f"start date default: {start_date.isoformat()} (14 days from today)")
+        elif start_date is None:
+            start_date = end_date - timedelta(days=duration_days - 1)
+        else:
+            end_date = start_date + timedelta(days=duration_days - 1)
+    if end_date < start_date:
+        return {
+            "status": "clarification_required",
+            "reply": "Those dates appear to be in reverse order. What dates should I use?",
+            "missing": ["valid date range"],
+        }
+    duration_days = (end_date - start_date).days + 1
+
+    travelers = intake.travelers or 1
+    currency = (intake.currency or "USD").upper()
+    budget = intake.total_budget
+    if intake.currency is None and intake.total_budget is not None:
+        assumptions.append("currency default: USD")
+    if budget is None:
+        budget = max(1500.0, 500.0 * duration_days) * travelers
+        assumptions.append(f"budget default: {currency} {budget:,.0f} total for {travelers} traveler(s)")
+    if intake.travelers is None:
+        assumptions.append("1 traveler (default)")
+    pace = intake.pace or "moderate"
+    if intake.pace is None:
+        assumptions.append("moderate pace (default)")
+
+    trip_request = TripRequest(
+        origin_city=intake.origin_city.strip(),
+        destinations=intake.destinations,
+        start_date=start_date,
+        end_date=end_date,
+        total_budget=budget,
+        currency=currency,
+        travelers=travelers,
+        pace=pace,
+        preferences=intake.preferences,
+        notes=intake.notes,
+        max_iterations=4,
+    )
+    job = await create_trip(trip_request)
+    return {**job, "assumptions": assumptions}
 
 
 @app.get("/trips/{job_id}/stream")
