@@ -100,6 +100,7 @@ GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 GLM_MODEL = os.getenv("GLM_MODEL", "z-ai/glm-5.3")
 GLM_VISION_MODEL = os.getenv("GLM_VISION_MODEL", "z-ai/glm-5.3-flash")
 GLM_CHAT_MODEL = os.getenv("GLM_CHAT_MODEL", "z-ai/glm-5.3-flash")
+GLM_CHAT_REASONING_EFFORT = os.getenv("GLM_CHAT_REASONING_EFFORT", "low")
 
 if not NVIDIA_API_KEY:
     logger.warning(
@@ -128,7 +129,7 @@ chat_llm = _build_llm(
     max_tokens=256,
     timeout=45,
     max_retries=0,
-    extra_body={"reasoning_effort": "low", "clear_thinking": True},
+    extra_body={"reasoning_effort": GLM_CHAT_REASONING_EFFORT, "clear_thinking": True},
 )
 
 # --------------------------------------------------------------------------
@@ -478,6 +479,7 @@ async def health():
         "status": "ok",
         "model": GLM_MODEL,
         "chat_model": GLM_CHAT_MODEL,
+        "chat_reasoning_effort": GLM_CHAT_REASONING_EFFORT,
         "vision_model": GLM_VISION_MODEL,
     }
 
