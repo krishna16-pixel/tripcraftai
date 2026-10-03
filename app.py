@@ -24,18 +24,27 @@ Env vars:
     GLM_PLANNING_MODEL    default: z-ai/glm-5.3        (planning / reasoning / tool use)
     GLM_MODEL             legacy alias for GLM_PLANNING_MODEL
     GLM_AGENT_MODEL       default: GLM_PLANNING_MODEL (live-research chat with tools)
-    GLM_AGENT_MAX_TOKENS  default: 4096 (tool-assisted travel answers)
-    GLM_AGENT_TIMEOUT_SECONDS default: 120
+    GLM_AGENT_MAX_TOKENS  default: 16384 (tool-assisted travel answers)
+    GLM_AGENT_TIMEOUT_SECONDS default: 180
     GLM_AGENT_REASONING_EFFORT default: low
+    GLM_PLANNING_MAX_TOKENS default: 16384 (structured itinerary drafts)
+    RESEARCH_MAX_ITERATIONS default: 5 (research-agent tool steps per pass)
+    RESEARCH_TIMEOUT_SECONDS default: 150 (fail fast instead of hanging)
+    TRIP_MAX_ITERATIONS   default: 2 (UI /trips/from-chat passes; /trips default 4)
+    GEOCODE_TIMEOUT_SECONDS default: 5 (Nominatim lookup cap per city)
     GLM_VISION_MODEL      default: z-ai/glm-5.3-flash  (multimodal -- used for image uploads)
     TAVILY_API_KEY        optional. Better web search than the DuckDuckGo fallback.
+                           When set, 10 results per query (search_depth=advanced).
+    CUSTOM_PROMPT_FILE    default: ./my_prompt.txt (plain txt you edit; prepended
+                           to every AI prompt -- chat, research, draft, intake).
     MCP_SERVERS_JSON      optional. JSON config overriding the default free MCP
                            servers (see mcp.py -- time / fetch / public_apis, all
                            free, no key required).
     MCP_SERVERS_FILE      optional. Path to a JSON file with the same config.
     MCP_USE_DEFAULT_SERVERS  default: true. Set "false" to run with no MCP
                            servers instead of the free defaults.
-    GLM_CHAT_MAX_TOKENS   default: 192 (short output budget for ordinary chat)
+    MCP_CONNECT_TIMEOUT_SECONDS default: 30 (max wait for MCP servers to connect).
+    GLM_CHAT_MAX_TOKENS   default: 16384 (full output budget for chat + citations)
     UPLOAD_DIR             default: ./uploads
 
 Why NVIDIA + GLM-5.3: NVIDIA's API catalog (build.nvidia.com) hosts GLM-5.3
@@ -68,6 +77,44 @@ from pydantic import BaseModel, Field
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("trip_planner.app")
+
+# --------------------------------------------------------------------------
+# Custom user prompt (plain txt file you edit yourself).
+# Loaded from CUSTOM_PROMPT_FILE or ./my_prompt.txt and prepended to every
+# AI prompt (chat, research, draft, intake). Empty file = built-in defaults.
+# Re-read when the file mtime changes so you can edit without restarting.
+# --------------------------------------------------------------------------
+_CUSTOM_PROMPT_CACHE = {"mtime": 0.0, "text": "", "path": ""}
+
+
+def _custom_prompt_path() -> str:
+    return os.getenv(
+        "CUSTOM_PROMPT_FILE", os.path.join(_THIS_DIR if "_THIS_DIR" in globals() else os.path.dirname(os.path.abspath(__file__)), "my_prompt.txt")
+    )
+
+
+def get_custom_prompt() -> str:
+    path = _custom_prompt_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return ""
+    if path != _CUSTOM_PROMPT_CACHE.get("path") or mtime != _CUSTOM_PROMPT_CACHE.get("mtime"):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read().strip()
+            _CUSTOM_PROMPT_CACHE.update({"mtime": mtime, "text": text, "path": path})
+        except Exception as exc:
+            logger.warning("Could not read custom prompt %s: %s", path, exc)
+            return ""
+    return _CUSTOM_PROMPT_CACHE.get("text", "")
+
+
+def _with_custom_prompt(base: str) -> str:
+    custom = get_custom_prompt()
+    if not custom:
+        return base
+    return f"Custom user instructions (highest priority, always follow):\n{custom}\n\n{base}"
 
 # --------------------------------------------------------------------------
 # Load mcp.py as "trip_mcp" (NOT as "mcp") -- see the long comment in
@@ -109,8 +156,9 @@ GLM_PLANNING_MODEL = os.getenv(
 GLM_VISION_MODEL = os.getenv("GLM_VISION_MODEL", "z-ai/glm-5.3-flash")
 GLM_CHAT_MODEL = os.getenv("GLM_CHAT_MODEL", "z-ai/glm-5.3-flash")
 GLM_CHAT_REASONING_EFFORT = os.getenv("GLM_CHAT_REASONING_EFFORT", "low")
-GLM_CHAT_MAX_TOKENS = int(os.getenv("GLM_CHAT_MAX_TOKENS", "192"))
-GLM_CHAT_TIMEOUT_SECONDS = int(os.getenv("GLM_CHAT_TIMEOUT_SECONDS", "90"))
+GLM_CHAT_MAX_TOKENS = int(os.getenv("GLM_CHAT_MAX_TOKENS", "16384"))
+GLM_CHAT_TIMEOUT_SECONDS = int(os.getenv("GLM_CHAT_TIMEOUT_SECONDS", "180"))
+GLM_PLANNING_MAX_TOKENS = int(os.getenv("GLM_PLANNING_MAX_TOKENS", "16384"))
 
 if not NVIDIA_API_KEY:
     logger.warning(
@@ -131,7 +179,7 @@ def _build_llm(model: str, temperature: float = 0.3, **client_options):
     )
 
 
-llm = _build_llm(GLM_PLANNING_MODEL, temperature=0.3)
+llm = _build_llm(GLM_PLANNING_MODEL, temperature=0.3, max_tokens=GLM_PLANNING_MAX_TOKENS)
 chat_llm = _build_llm(
     GLM_CHAT_MODEL,
     temperature=0.4,
@@ -144,11 +192,11 @@ chat_llm = _build_llm(
     extra_body={"reasoning_effort": GLM_CHAT_REASONING_EFFORT},
 )
 
-# Live-research chat model: tool calling needs a bigger token budget than
-# casual chat (reasoning + a full day-by-day itinerary).
+# Live-research chat model: tool calling needs the full token budget
+# (reasoning + a full day-by-day itinerary + citations).
 GLM_AGENT_MODEL = os.getenv("GLM_AGENT_MODEL", GLM_PLANNING_MODEL)
-GLM_AGENT_MAX_TOKENS = int(os.getenv("GLM_AGENT_MAX_TOKENS", "4096"))
-GLM_AGENT_TIMEOUT_SECONDS = int(os.getenv("GLM_AGENT_TIMEOUT_SECONDS", "120"))
+GLM_AGENT_MAX_TOKENS = int(os.getenv("GLM_AGENT_MAX_TOKENS", "16384"))
+GLM_AGENT_TIMEOUT_SECONDS = int(os.getenv("GLM_AGENT_TIMEOUT_SECONDS", "180"))
 GLM_AGENT_REASONING_EFFORT = os.getenv("GLM_AGENT_REASONING_EFFORT", "low")
 
 agent_llm = _build_llm(
@@ -298,23 +346,30 @@ async def _get_research_agent():
     from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
     tools = await get_agent_tools()
+    system_text = _with_custom_prompt(
+        "You are a travel researcher. Given trip constraints (and, on a "
+        "replanning pass, a list of problems with the previous plan), use "
+        "your tools to gather real, current, specific facts: attraction "
+        "names and opening hours, realistic ticket/meal/lodging costs in "
+        "local currency, intercity transport options and durations, and any "
+        "entry requirements. Prefer multiple targeted searches over one "
+        "broad one. Use web_search with 10 results per query when available. "
+        "Finish with a concise, well-organized briefing the "
+        "planner can turn directly into a day-by-day itinerary -- do NOT "
+        "write the itinerary yourself, just the research findings."
+    )
     prompt = ChatPromptTemplate.from_messages([
-        ("system", (
-            "You are a travel researcher. Given trip constraints (and, on a "
-            "replanning pass, a list of problems with the previous plan), use "
-            "your tools to gather real, current, specific facts: attraction "
-            "names and opening hours, realistic ticket/meal/lodging costs in "
-            "local currency, intercity transport options and durations, and any "
-            "entry requirements. Prefer multiple targeted searches over one "
-            "broad one. Finish with a concise, well-organized briefing the "
-            "planner can turn directly into a day-by-day itinerary -- do NOT "
-            "write the itinerary yourself, just the research findings."
-        )),
+        ("system", system_text),
         ("human", "{input}"),
         MessagesPlaceholder("agent_scratchpad"),
     ])
     agent = create_tool_calling_agent(llm, tools, prompt)
-    _agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False, max_iterations=8)
+    _agent_executor = AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=False,
+        max_iterations=int(os.getenv("RESEARCH_MAX_ITERATIONS", "5")),
+    )
     return _agent_executor
 
 
@@ -379,7 +434,13 @@ async def research_phase(
     if job_id:
         callback_cls = _get_phase_callback_cls()
         config = {"callbacks": [callback_cls(job_id)]}
-    result = await agent.ainvoke({"input": task}, config=config)
+    # Bound the research loop so a hung LLM/tool can never stall planning
+    # forever -- the job fails fast with a clear error instead.
+    timeout_s = int(os.getenv("RESEARCH_TIMEOUT_SECONDS", "150"))
+    try:
+        result = await asyncio.wait_for(agent.ainvoke({"input": task}, config=config), timeout=timeout_s)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(f"Research took longer than {timeout_s}s; try again or set RESEARCH_MAX_ITERATIONS lower.") from exc
     return result.get("output", "")
 
 
@@ -398,7 +459,7 @@ async def draft_phase(
             "\n\nThe previous draft failed validation for these reasons -- fix "
             "them in this new draft:\n- " + "\n- ".join(feedback)
         )
-    prompt = (
+    prompt = _with_custom_prompt(
         "Build a complete, realistic day-by-day multi-city itinerary from the "
         "constraints and research below. Every day in the date range must "
         "appear exactly once. Respect the daily time window and pace. Include "
@@ -494,6 +555,21 @@ app.add_middleware(
 jobs: Dict[str, dict] = {}  # job_id -> {status, result, error}
 
 
+@app.on_event("startup")
+async def _warmup_agent_tools():
+    """Pre-connect MCP servers at boot (in the background) so the first
+    real request doesn't pay the `uvx` download/connect cost. Failures
+    only log -- requests still work with web_search + route estimator."""
+    async def _run():
+        try:
+            tools = await get_agent_tools()
+            logger.info("Startup warmup: %d agent tool(s) ready.", len(tools))
+        except Exception as exc:
+            logger.warning("Startup warmup failed (non-fatal): %s", exc)
+
+    asyncio.create_task(_run())
+
+
 class TripRequest(TripConstraints):
     max_iterations: int = Field(default=4, ge=1, le=8)
 
@@ -525,10 +601,13 @@ class TripChatIntake(BaseModel):
 
 @app.get("/health")
 async def health():
+    custom_path = _custom_prompt_path()
+    custom_loaded = bool(get_custom_prompt())
     return {
         "status": "ok",
         "model": GLM_PLANNING_MODEL,
         "planning_model": GLM_PLANNING_MODEL,
+        "planning_max_tokens": GLM_PLANNING_MAX_TOKENS,
         "chat_model": GLM_CHAT_MODEL,
         "chat_reasoning_effort": GLM_CHAT_REASONING_EFFORT,
         "chat_max_tokens": GLM_CHAT_MAX_TOKENS,
@@ -536,8 +615,20 @@ async def health():
         "vision_model": GLM_VISION_MODEL,
         "live_chat_model": GLM_AGENT_MODEL,
         "live_search_backend": "tavily" if os.getenv("TAVILY_API_KEY") else "duckduckgo",
+        "live_search_results": 10,
         "live_tools": [t.name for t in live_chat.TOOLS],
+        "custom_prompt_file": custom_path,
+        "custom_prompt_loaded": custom_loaded,
+        "mcp_connect_timeout_seconds": int(os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "30")),
     }
+
+
+@app.get("/health/mcp")
+async def health_mcp():
+    """Real MCP diagnostics -- proves MCP servers actually connect."""
+    from trip_mcp import get_mcp_status
+
+    return await get_mcp_status()
 
 
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
@@ -579,7 +670,7 @@ async def chat(request: ChatRequest):
 
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-    messages = [SystemMessage(content=(
+    messages = [SystemMessage(content=_with_custom_prompt(
         "You are TripCraft, a friendly assistant for natural, everyday conversation, "
         "with extra strength in travel. Reply directly to greetings and casual chat; "
         "do not turn simple chat into a travel-planning questionnaire. Keep normal "
@@ -711,7 +802,7 @@ async def create_trip_from_chat(request: ChatRequest):
         {"role": turn.role, "content": turn.content}
         for turn in request.history[-10:]
     ]
-    extraction_prompt = (
+    extraction_prompt = _with_custom_prompt(
         "Extract a trip request into the provided structured fields. Use only details "
         "stated in the current message or conversation history. Never invent an origin "
         "city or destination; leave either missing if unclear. Resolve relative dates "
@@ -724,7 +815,7 @@ async def create_trip_from_chat(request: ChatRequest):
     )
     try:
         intake = await agent_llm.with_structured_output(TripChatIntake).ainvoke([
-            SystemMessage(content="Extract trip details faithfully. Do not add unspecified locations."),
+            SystemMessage(content=_with_custom_prompt("Extract trip details faithfully. Do not add unspecified locations.")),
             HumanMessage(content=extraction_prompt),
         ])
         if not isinstance(intake, TripChatIntake):
@@ -799,7 +890,9 @@ async def create_trip_from_chat(request: ChatRequest):
         pace=pace,
         preferences=intake.preferences,
         notes=intake.notes,
-        max_iterations=4,
+        # UI path defaults to 2 passes for speed (each pass = research +
+        # draft + validate). Override with TRIP_MAX_ITERATIONS if needed.
+        max_iterations=int(os.getenv("TRIP_MAX_ITERATIONS", "2")),
     )
     job = await create_trip(trip_request)
     return {**job, "assumptions": assumptions}
