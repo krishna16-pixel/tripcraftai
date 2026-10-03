@@ -246,25 +246,33 @@
         }
         .source-card .src-domain { font-size: 11px; color: #777; }
         .assistant-toolbar {
-            display: flex;
+            display: none;
             flex-wrap: wrap;
             align-items: center;
-            gap: 4px;
-            margin-top: 10px;
+            gap: 3px;
+            margin-top: 8px;
+        }
+        .assistant-toolbar.is-ready {
+            display: flex;
+            animation: assistantActionsIn .18s ease-out both;
+        }
+        @keyframes assistantActionsIn {
+            from { opacity: 0; transform: translateY(-3px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         .assistant-action-btn {
-            min-height: 32px;
+            min-height: 30px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            gap: 6px;
+            gap: 5px;
             border: 1px solid transparent;
             border-radius: 9px;
             background: transparent;
             color: #858585;
-            padding: 0 8px;
+            padding: 0 6px;
             font: inherit;
-            font-size: 12px;
+            font-size: 11px;
             transition: color .18s ease, background .18s ease, border-color .18s ease;
         }
         .assistant-action-btn:not(:disabled) { cursor: pointer; }
@@ -279,7 +287,7 @@
             background: #202020;
             border-color: #383838;
         }
-        .assistant-action-btn svg { width: 16px; height: 16px; }
+        .assistant-action-btn svg { width: 14px; height: 14px; }
         .assistant-action-btn .source-count { color: #b8b8b8; font-variant-numeric: tabular-nums; }
         #sourceBackdrop {
             opacity: 0;
@@ -300,6 +308,7 @@
         #actionToast.is-visible { opacity: 1; transform: translate(-50%, 0); }
         @media (prefers-reduced-motion: reduce) {
             #sourceBackdrop, #sourceSidebar, #actionToast { transition-duration: .01ms; }
+            .assistant-toolbar.is-ready { animation: none; }
         }
     </style>
 </head>
@@ -1139,6 +1148,7 @@
                 likeButton.disabled = !hasAnswer;
                 dislikeButton.disabled = !hasAnswer;
                 retryButton.disabled = msgDiv !== lastAssistantNodes?.msgDiv;
+                msgDiv.querySelector('.assistant-toolbar').classList.add('is-ready');
                 statusTextNode.classList.remove('shimmer');
                 if (!thinkingLog.length) {
                     statusNode.style.display = 'none';
