@@ -31,6 +31,8 @@ Env vars:
     RESEARCH_MAX_ITERATIONS default: 5 (research-agent tool steps per pass)
     RESEARCH_TIMEOUT_SECONDS default: 150 (fail fast instead of hanging)
     TRIP_MAX_ITERATIONS   default: 2 (passes for trip planning started from chat)
+    TRIP_CHAT_FAST        default: 1 (skip web research + use fast model for chat trips)
+    TRIP_FAST_TIMEOUT_SECONDS default: 120
     GEOCODE_TIMEOUT_SECONDS default: 5 (Nominatim lookup cap per city)
     GLM_VISION_MODEL      default: z-ai/glm-5.3-flash  (multimodal -- used for image uploads)
     TAVILY_API_KEY        optional. Better web search than the DuckDuckGo fallback.
@@ -192,6 +194,18 @@ chat_llm = _build_llm(
     # supported reasoning-effort option so chat requests are accepted.
     extra_body={"reasoning_effort": GLM_CHAT_REASONING_EFFORT},
 )
+
+# Fast itinerary drafter for trip requests started in chat: the lighter model
+# with low reasoning, so a full day-by-day plan comes back in seconds.
+fast_llm = _build_llm(
+    GLM_CHAT_MODEL,
+    temperature=0.2,
+    max_tokens=GLM_PLANNING_MAX_TOKENS,
+    timeout=int(os.getenv("TRIP_FAST_TIMEOUT_SECONDS", "120")),
+    max_retries=0,
+    extra_body={"reasoning_effort": "low"},
+)
+TRIP_CHAT_FAST = os.getenv("TRIP_CHAT_FAST", "1") == "1"
 
 # Live-research chat model: tool calling needs the full token budget
 # (reasoning + a full day-by-day itinerary + citations).
@@ -452,9 +466,10 @@ async def draft_phase(
     attachment_context: str,
     feedback: Optional[List[str]] = None,
     job_id: Optional[str] = None,
+    fast: bool = False,
 ) -> Itinerary:
     await _emit(job_id, "plotting", "Assembling the day-by-day itinerary")
-    structured_llm = llm.with_structured_output(Itinerary)
+    structured_llm = (fast_llm if fast else llm).with_structured_output(Itinerary)
     feedback_block = ""
     if feedback:
         feedback_block = (
@@ -472,7 +487,9 @@ async def draft_phase(
         "total_estimated_cost equal to the sum of all lodging, transfer, and "
         "activity costs.\n\n"
         f"Constraints:\n{constraints.model_dump_json(indent=2)}\n\n"
-        f"Research findings:\n{research_notes}\n"
+        + ("No web research was run: rely on well-known, realistic general knowledge, "
+           "keep estimates conservative, and omit opening_hours.\n\n" if fast else "")
+        + f"Research findings:\n{research_notes or '(none)'}\n"
         f"{('Attachment context:' + attachment_context) if attachment_context else ''}"
         f"{feedback_block}"
     )
@@ -489,12 +506,17 @@ def _attachment_context(attachment_ids: List[str]) -> str:
     return "\n".join(parts)
 
 
-async def plan_trip(constraints: TripConstraints, max_iterations: int = 4, job_id: Optional[str] = None) -> dict:
+async def plan_trip(
+    constraints: TripConstraints,
+    max_iterations: int = 4,
+    job_id: Optional[str] = None,
+    fast: bool = False,
+) -> dict:
     attachment_context = _attachment_context(constraints.attachment_ids)
     history = []
     feedback: Optional[List[str]] = None
 
-    if _agent_executor is None:
+    if not fast and _agent_executor is None:
         await _emit(job_id, "architecting", "Building the research agent and its tools")
     await _emit(
         job_id, "orchestrating",
@@ -505,8 +527,8 @@ async def plan_trip(constraints: TripConstraints, max_iterations: int = 4, job_i
     for i in range(1, max_iterations + 1):
         if i > 1:
             await _emit(job_id, "dilly dallying", f"Draft {i - 1} didn't pass validation -- taking another pass")
-        notes = await research_phase(constraints, attachment_context, feedback, job_id=job_id)
-        itinerary = await draft_phase(constraints, notes, attachment_context, feedback, job_id=job_id)
+        notes = "" if fast else await research_phase(constraints, attachment_context, feedback, job_id=job_id)
+        itinerary = await draft_phase(constraints, notes, attachment_context, feedback, job_id=job_id, fast=fast)
         report: ValidationReport = validate_itinerary(
             itinerary, constraints,
             on_phase=(lambda phase, detail="", _jid=job_id: _emit_sync(_jid, phase, detail)),
@@ -824,7 +846,7 @@ async def _stream_trip_chat(message: str, history: list):
     job_queues[job_id] = queue
     max_iterations = int(os.getenv("TRIP_MAX_ITERATIONS", "2"))
     task = asyncio.create_task(
-        plan_trip(req["constraints"], max_iterations=max_iterations, job_id=job_id)
+        plan_trip(req["constraints"], max_iterations=max_iterations, job_id=job_id, fast=TRIP_CHAT_FAST)
     )
     try:
         yield _data({"trip_pending": False})
@@ -835,6 +857,13 @@ async def _stream_trip_chat(message: str, history: list):
                 continue
             yield _data({"status": item.get("phase", "working"), "detail": item.get("detail", "")})
         plan = task.result()
+        issues = [i.get("message", "") for i in ((plan.get("validation") or {}).get("issues") or [])][:4]
+        yield _data({
+            "itinerary": plan.get("itinerary") or {},
+            "assumptions": req["assumptions"],
+            "validation_notes": issues,
+            "plan_status": plan.get("status"),
+        })
         yield _data({"token": _format_trip_reply(plan, req["assumptions"])})
     except Exception as exc:
         logger.exception("Trip planning from chat failed")

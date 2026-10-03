@@ -760,6 +760,96 @@
             catch { return String(url || '').slice(0, 40); }
         }
 
+        // ---- Structured itinerary card (rendered in chat from the planner's JSON) ----
+        function el(tag, className, text) {
+            const node = document.createElement(tag);
+            if (className) node.className = className;
+            if (text !== undefined && text !== null && text !== '') node.textContent = String(text);
+            return node;
+        }
+
+        function formatTripDate(iso) {
+            const d = new Date(`${iso}T00:00:00`);
+            return isNaN(d) ? String(iso || '') : d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+        }
+
+        function clockTime(value) {
+            return String(value || '').slice(0, 5);
+        }
+
+        function renderItinerary(container, itinerary, assumptions = [], validationNotes = [], planStatus = '') {
+            const currency = itinerary.currency || 'USD';
+            const money = (n) => `${currency} ${Math.round(Number(n) || 0).toLocaleString('en-US')}`;
+            const days = itinerary.days || [];
+            const cities = [...new Set(days.map(day => day.city).filter(Boolean))];
+
+            container.textContent = '';
+            const card = el('div', 'space-y-4 text-[15px] leading-relaxed text-gray-200');
+
+            card.appendChild(el('h2', 'text-xl font-semibold text-white', itinerary.trip_title || 'Your trip itinerary'));
+            if (itinerary.summary) card.appendChild(el('p', 'text-gray-300', itinerary.summary));
+
+            const chips = el('div', 'flex flex-wrap gap-2');
+            chips.appendChild(el('span', 'px-3 py-1 rounded-full bg-white/10 text-xs text-gray-200', `${days.length} day${days.length === 1 ? '' : 's'}`));
+            if (cities.length) chips.appendChild(el('span', 'px-3 py-1 rounded-full bg-white/10 text-xs text-gray-200', cities.join(' → ')));
+            chips.appendChild(el('span', 'px-3 py-1 rounded-full bg-white/10 text-xs text-gray-200', `Est. ${money(itinerary.total_estimated_cost)}`));
+            card.appendChild(chips);
+
+            days.forEach((day, index) => {
+                const section = el('section', 'rounded-xl border border-white/10 bg-white/[0.03] p-4');
+                const head = el('div', 'flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-2');
+                head.appendChild(el('h3', 'font-semibold text-white', `Day ${index + 1} · ${day.city || 'Destination'}`));
+                head.appendChild(el('span', 'text-xs text-gray-400', formatTripDate(day.date)));
+                section.appendChild(head);
+
+                if (day.transfer) {
+                    const t = day.transfer;
+                    section.appendChild(el('div', 'text-sm text-amber-200/90 mb-3',
+                        `Travel: ${t.from_city} → ${t.to_city} by ${t.mode}, ${clockTime(t.depart_time)}–${clockTime(t.arrive_time)}`));
+                }
+
+                const list = el('ul', 'space-y-2');
+                (day.activities || []).forEach(activity => {
+                    const item = el('li', 'flex gap-3');
+                    item.appendChild(el('span', 'w-28 shrink-0 text-xs text-gray-400 pt-0.5 tabular-nums',
+                        `${clockTime(activity.start_time)}–${clockTime(activity.end_time)}`));
+                    const body = el('div', 'flex-1 min-w-0');
+                    const row = el('div', 'flex justify-between gap-3');
+                    row.appendChild(el('span', 'text-gray-100 font-medium', activity.name || 'Activity'));
+                    if (Number(activity.estimated_cost) > 0) row.appendChild(el('span', 'text-xs text-gray-400 shrink-0', money(activity.estimated_cost)));
+                    body.appendChild(row);
+                    if (activity.notes) body.appendChild(el('div', 'text-sm text-gray-400', activity.notes));
+                    item.appendChild(body);
+                    list.appendChild(item);
+                });
+                section.appendChild(list);
+
+                if (Number(day.lodging_cost) > 0) {
+                    section.appendChild(el('div', 'mt-3 pt-3 border-t border-white/10 text-xs text-gray-400', `Lodging: ${money(day.lodging_cost)}`));
+                }
+                card.appendChild(section);
+            });
+
+            card.appendChild(el('div', 'pt-1 font-semibold text-white', `Estimated total: ${money(itinerary.total_estimated_cost)}`));
+
+            if (assumptions.length) {
+                const details = el('details', 'text-sm text-gray-400');
+                details.appendChild(el('summary', 'cursor-pointer', `Assumptions (${assumptions.length})`));
+                const ul = el('ul', 'mt-2 list-disc pl-5 space-y-1');
+                assumptions.forEach(a => ul.appendChild(el('li', '', a)));
+                details.appendChild(ul);
+                card.appendChild(details);
+            }
+
+            if (validationNotes.length) {
+                card.appendChild(el('p', 'text-sm text-amber-200/90', `Check before booking: ${validationNotes.join(' ')}`));
+            }
+            if (planStatus === 'unresolved_after_max_iterations') {
+                card.appendChild(el('p', 'text-sm text-amber-200/90', 'Some validation items may still need review.'));
+            }
+            container.appendChild(card);
+        }
+
         // Send the user's message and recent conversation to the real AI backend.
         async function handleAIResponse(prompt, aiNodes, history, requestConversationId) {
             const statusContainer = aiNodes.statusNode;
@@ -788,6 +878,7 @@
                 }
 
                 let reply = '';
+                let structuredRendered = false;
                 const contentType = response.headers.get('content-type') || '';
                 if (contentType.includes('text/event-stream') && response.body) {
                     const reader = response.body.getReader();
@@ -818,11 +909,18 @@
                             chatArea.scrollTop = chatArea.scrollHeight;
                             return;
                         }
+                        if (data.itinerary && typeof data.itinerary === 'object') {
+                            if (requestConversationId !== conversationId) return;
+                            structuredRendered = true;
+                            renderItinerary(contentNode, data.itinerary, data.assumptions || [], data.validation_notes || [], data.plan_status || '');
+                            chatArea.scrollTop = chatArea.scrollHeight;
+                            return;
+                        }
                         if (typeof data.token === 'string' && data.token) {
                             if (requestConversationId !== conversationId) return;
                             reply += data.token;
                             showThinkingOrb(thinkingOrbHost, 'composing');
-                            contentNode.textContent += data.token;
+                            if (!structuredRendered) contentNode.textContent += data.token;
                             chatArea.scrollTop = chatArea.scrollHeight;
                         }
                     };
