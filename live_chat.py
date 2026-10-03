@@ -6,7 +6,7 @@ Live-research chat for TripCraft.
 Gives the /chat endpoint real, working tools (no `uvx`, no LangChain
 AgentExecutor, no extra API keys required):
 
-  web_search         Tavily (if TAVILY_API_KEY set) else DuckDuckGo (ddgs)
+  web_search         Tavily (if TAVILY_API_KEY set, 10 results) else DuckDuckGo (10)
   fetch_page         read a web page's text
   get_weather        Open-Meteo forecast (free, no key)
   get_exchange_rate  open.er-api.com (free, no key)
@@ -15,7 +15,8 @@ AgentExecutor, no extra API keys required):
 `stream_live_chat()` runs a small tool-calling loop on a chat model and
 yields dict events the SSE layer relays to the browser:
 
-  {"status": "Searching the web: ..."}   live progress
+  {"status": "Searching the web: ...", "detail": "...", "tool": "..."} live progress
+  {"sources": [{title,url,domain}]}    logo-card citations (no numbers)
   {"token": "..."}                       answer text
   {"error": "..."}                       failure
 
@@ -43,19 +44,113 @@ logger = logging.getLogger("trip_planner.live_chat")
 
 HTTP_TIMEOUT = 15.0
 UA = {"User-Agent": "Mozilla/5.0 (TripCraftAI trip planner)"}
+SEARCH_MAX_RESULTS = 10
+
+# --------------------------------------------------------------------------
+# Custom user prompt (plain txt -- same file as app.py: my_prompt.txt)
+# --------------------------------------------------------------------------
+_CUSTOM_PROMPT_CACHE = {"mtime": 0.0, "text": ""}
+
+
+def get_custom_prompt() -> str:
+    path = os.getenv(
+        "CUSTOM_PROMPT_FILE",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "my_prompt.txt"),
+    )
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return ""
+    if mtime != _CUSTOM_PROMPT_CACHE.get("mtime"):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                _CUSTOM_PROMPT_CACHE.update({"mtime": mtime, "text": f.read().strip()})
+        except Exception as exc:
+            logger.warning("Could not read custom prompt %s: %s", path, exc)
+            return ""
+    return _CUSTOM_PROMPT_CACHE.get("text", "")
+
+
+def _with_custom_prompt(base: str) -> str:
+    custom = get_custom_prompt()
+    if not custom:
+        return base
+    return f"Custom user instructions (highest priority, always follow):\n{custom}\n\n{base}"
+
+
+# --------------------------------------------------------------------------
+# Sources for logo-card citations (no numbers)
+# --------------------------------------------------------------------------
+_URL_RE = re.compile(r"https?://[^\s\)\]]+")
+
+
+def _domain_of(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+
+        return urlparse(url).netloc.lower().replace("www.", "")
+    except Exception:
+        return ""
+
+
+def _extract_sources(search_text: str) -> List[dict]:
+    """Parse `- title\\n  url\\n  snippet` search output into logo-card sources."""
+    sources: List[dict] = []
+    if not search_text:
+        return sources
+    # Structured lines first (title + url pairs)
+    lines = search_text.splitlines()
+    pending_title = ""
+    for line in lines:
+        s = line.strip()
+        if s.startswith("- ") and len(s) > 2:
+            pending_title = s[2:].strip()[:120]
+            continue
+        m = _URL_RE.search(s)
+        if m:
+            url = m.group(0).rstrip(".,;")
+            domain = _domain_of(url)
+            if not domain:
+                continue
+            title = pending_title or domain
+            sources.append({"title": title, "url": url, "domain": domain})
+            pending_title = ""
+            if len(sources) >= SEARCH_MAX_RESULTS:
+                break
+    # Fallback: any bare URLs in the text
+    if not sources:
+        for m in _URL_RE.finditer(search_text):
+            url = m.group(0).rstrip(".,;")
+            domain = _domain_of(url)
+            if domain:
+                sources.append({"title": domain, "url": url, "domain": domain})
+            if len(sources) >= SEARCH_MAX_RESULTS:
+                break
+    # Dedupe by URL
+    seen = set()
+    uniq: List[dict] = []
+    for s in sources:
+        if s["url"] not in seen:
+            seen.add(s["url"])
+            uniq.append(s)
+    return uniq[:SEARCH_MAX_RESULTS]
 
 # --------------------------------------------------------------------------
 # Tools
 # --------------------------------------------------------------------------
 
 
-def _search_sync(query: str, max_results: int = 6) -> str:
+def _search_sync(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
     key = os.getenv("TAVILY_API_KEY")
     if key:
         try:
             from tavily import TavilyClient
 
-            res = TavilyClient(api_key=key).search(query=query, max_results=max_results)
+            res = TavilyClient(api_key=key).search(
+                query=query,
+                max_results=max_results,
+                search_depth="advanced",
+            )
             rows = [
                 f"- {r.get('title', '')}\n  {r.get('url', '')}\n  {(r.get('content') or '')[:400]}"
                 for r in res.get("results", [])
@@ -87,8 +182,9 @@ def _search_sync(query: str, max_results: int = 6) -> str:
 
 @tool
 async def web_search(query: str) -> str:
-    """Search the live web. Use for current prices, opening hours, events, visa/entry rules,
-    transport options, news, hotel areas, safety notes. Input: a short, specific query."""
+    """Search the live web (up to 10 websites per query). Use for current prices, opening hours,
+    events, visa/entry rules, transport options, news, hotel areas, safety notes.
+    Input: a short, specific query."""
     return await asyncio.to_thread(_search_sync, query)
 
 
@@ -191,7 +287,7 @@ def _status_for(name: str, args: dict) -> str:
     if name == "web_search":
         return f"Searching the web: {str(args.get('query', ''))[:80]}"
     if name == "fetch_page":
-        return "Reading a web page"
+        return f"Reading a web page: {str(args.get('url', ''))[:80]}"
     if name == "get_weather":
         return f"Checking live weather: {args.get('city', '')}"
     if name == "get_exchange_rate":
@@ -199,6 +295,14 @@ def _status_for(name: str, args: dict) -> str:
     if name == "get_current_datetime":
         return "Checking the date and time"
     return f"Running {name}"
+
+
+def _detail_for(name: str, args: dict) -> str:
+    """Raw backend detail shown when the thinking label is clicked (Claude-style)."""
+    try:
+        return json.dumps({k: str(v)[:200] for k, v in (args or {}).items()}, ensure_ascii=False)
+    except Exception:
+        return str(args)[:300]
 
 
 # --------------------------------------------------------------------------
@@ -231,7 +335,7 @@ def needs_live_research(message: str) -> bool:
 
 def build_system_prompt() -> str:
     now = datetime.now(timezone.utc)
-    return (
+    base = (
         "You are TripCraft, a friendly, practical travel-planning assistant.\n"
         f"Current date/time: {now.strftime('%A, %Y-%m-%d %H:%M')} UTC. Resolve 'today', "
         "'tomorrow', 'this weekend' from this date (use get_current_datetime for a "
@@ -241,14 +345,19 @@ def build_system_prompt() -> str:
         "(weather, prices, opening hours, events, visa/entry rules, transport, safety), CALL "
         "THE TOOLS first -- never guess and never say you cannot check live info. Make several "
         "targeted calls (weather + prices + attractions/hours + transport/visa) before "
-        "answering a planning request. Do not write any text before your tool calls.\n\n"
+        "answering a planning request. web_search returns up to 10 websites per query -- "
+        "use 2-3 targeted queries for good coverage. Do not write any text before your tool calls.\n\n"
         "When asked to plan a trip: if dates/budget are missing, assume sensible defaults, state "
         "them in one line, and still deliver the full plan. Give a day-by-day itinerary with "
         "times, estimated costs (with the local currency and a conversion if useful), the live "
         "weather, transport tips, and a short 'check before you go' list (visa, bookings). "
-        "Mention the source name for important facts. Only state as verified what the tools "
-        "returned; label anything else as an estimate. For casual chat, reply briefly."
+        "Only state as verified what the tools "
+        "returned; label anything else as an estimate. For casual chat, reply briefly.\n\n"
+        "CITATIONS: sources are shown automatically as logo cards below your answer. "
+        "Do NOT write citation numbers like [1] [2] or markdown footnotes -- just write a "
+        "natural answer and mention the source name in words when it matters."
     )
+    return _with_custom_prompt(base)
 
 
 def _to_lc_messages(history: List[dict], message: str) -> List[BaseMessage]:
@@ -291,6 +400,25 @@ async def stream_live_chat(
     """Tool-calling loop. `agent_llm` is a streaming ChatOpenAI-style model."""
     messages = _to_lc_messages(history, message)
     answered = False
+    seen_sources: Dict[str, dict] = {}
+
+    def _sources_event() -> Optional[dict]:
+        if not seen_sources:
+            return None
+        return {"sources": list(seen_sources.values())[:SEARCH_MAX_RESULTS]}
+
+    def _ingest_tool_sources(call: dict, result: str) -> None:
+        name = call.get("name", "")
+        args = call.get("args") or {}
+        if name == "web_search":
+            for s in _extract_sources(result or ""):
+                seen_sources.setdefault(s["url"], s)
+        elif name == "fetch_page":
+            url = str(args.get("url", "")).strip()
+            if url.startswith("http"):
+                domain = _domain_of(url)
+                if domain:
+                    seen_sources.setdefault(url, {"title": domain, "url": url, "domain": domain})
 
     try:
         llm_tools = agent_llm.bind_tools(TOOLS)
@@ -298,8 +426,12 @@ async def stream_live_chat(
             final_step = step == max_steps - 1
             runner = agent_llm if final_step else llm_tools
             if final_step:
-                messages.append(HumanMessage(content="Now write the final answer using what you found."))
-            yield {"status": "Thinking" if step == 0 else "Putting it together"}
+                messages.append(HumanMessage(content="Now write the final answer using what you found. Do not add citation numbers; sources are shown as logo cards."))
+            yield {
+                "status": "Thinking" if step == 0 else "Putting it together",
+                "detail": f"step {step + 1}/{max_steps} reasoning with {agent_llm.model_name if hasattr(agent_llm, 'model_name') else 'GLM'}",
+                "tool": "reasoning",
+            }
 
             gathered = None
             async for chunk in runner.astream(messages):
@@ -313,16 +445,29 @@ async def stream_live_chat(
             if not calls or final_step:
                 if not answered:
                     yield {"error": "The AI returned an empty response. Please try again."}
+                else:
+                    ev = _sources_event()
+                    if ev:
+                        yield ev
                 return
 
             messages.append(gathered)
             if answered:
                 yield {"token": "\n\n"}
             for call in calls:
-                yield {"status": _status_for(call["name"], call.get("args") or {})}
+                args = call.get("args") or {}
+                yield {
+                    "status": _status_for(call["name"], args),
+                    "detail": _detail_for(call["name"], args),
+                    "tool": call["name"],
+                }
             results = await asyncio.gather(*[_run_tool(c) for c in calls])
             for call, result in zip(calls, results):
+                _ingest_tool_sources(call, result)
                 messages.append(ToolMessage(content=result, tool_call_id=call["id"], name=call["name"]))
+            ev = _sources_event()
+            if ev:
+                yield ev
         return
     except Exception as exc:
         if answered:
@@ -333,15 +478,21 @@ async def stream_live_chat(
 
     # ---- Fallback: pre-fetch live data, then a plain streamed answer ----
     try:
-        yield {"status": "Searching the web"}
+        yield {"status": "Searching the web", "detail": message[:200], "tool": "web_search"}
         queries = await asyncio.gather(
             _run_tool({"name": "web_search", "args": {"query": message[:200]}}),
             _run_tool({"name": "web_search", "args": {"query": f"{message[:150]} prices opening hours travel tips"}}),
         )
+        for q in queries:
+            for s in _extract_sources(q or ""):
+                seen_sources.setdefault(s["url"], s)
+        ev = _sources_event()
+        if ev:
+            yield ev
         context = "\n\n".join(f"Search results {i + 1}:\n{q}" for i, q in enumerate(queries))
         fb = _to_lc_messages(history, message)
         fb[0] = SystemMessage(content=fb[0].content + "\n\nLIVE SEARCH RESULTS (fetched just now):\n" + context)
-        yield {"status": "Writing your answer"}
+        yield {"status": "Writing your answer", "detail": "composing final answer from live results", "tool": "reasoning"}
         got = False
         async for chunk in agent_llm.astream(fb):
             text = _chunk_text(chunk)
@@ -350,6 +501,10 @@ async def stream_live_chat(
                 yield {"token": text}
         if not got:
             yield {"error": "The AI returned an empty response. Please try again."}
+        else:
+            ev = _sources_event()
+            if ev:
+                yield ev
     except Exception:
         logger.exception("Fallback path failed")
         yield {"error": "The AI request failed. Check NVIDIA_API_KEY and the model configuration in Render."}
