@@ -355,7 +355,12 @@ def build_system_prompt() -> str:
         "returned; label anything else as an estimate. For casual chat, reply briefly.\n\n"
         "CITATIONS: sources are shown automatically as logo cards below your answer. "
         "Do NOT write citation numbers like [1] [2] or markdown footnotes -- just write a "
-        "natural answer and mention the source name in words when it matters."
+        "natural answer and mention the source name in words when it matters.\n\n"
+        "FORMAT: make substantial answers easy to scan. Lead with a brief direct answer, "
+        "then use descriptive Markdown headings and concise bullets or numbered steps. "
+        "Use a Markdown table for side-by-side options, prices, durations, or pros/cons when "
+        "that is clearer than prose. Keep casual replies short, avoid repetitive headings, "
+        "and never emit raw HTML."
     )
     return _with_custom_prompt(base)
 

@@ -51,6 +51,84 @@
             border-radius: 4px;
         }
 
+        #chatArea {
+            scrollbar-width: thin;
+            scrollbar-color: #4b5563 transparent;
+            scrollbar-gutter: stable;
+            scroll-behavior: smooth;
+            overscroll-behavior: contain;
+        }
+        #chatArea::-webkit-scrollbar { width: 10px; }
+        #chatArea::-webkit-scrollbar-track { background: transparent; }
+        #chatArea::-webkit-scrollbar-thumb {
+            background: #424242;
+            border: 3px solid transparent;
+            border-radius: 999px;
+            background-clip: padding-box;
+        }
+        #chatArea::-webkit-scrollbar-thumb:hover { background-color: #666; }
+        #chatArea > .chat-message-row {
+            width: min(100%, 48rem);
+            margin-inline: auto;
+        }
+        .ai-content {
+            color: #e5e7eb;
+            font-size: 0.9375rem;
+            line-height: 1.75;
+            overflow-wrap: anywhere;
+        }
+        .ai-content > :first-child { margin-top: 0; }
+        .ai-content > :last-child { margin-bottom: 0; }
+        .ai-content p { margin: 0.7rem 0; }
+        .ai-content h1, .ai-content h2, .ai-content h3 {
+            color: #fff;
+            font-weight: 600;
+            line-height: 1.35;
+            margin: 1.15rem 0 0.5rem;
+        }
+        .ai-content h1 { font-size: 1.35rem; }
+        .ai-content h2 { font-size: 1.15rem; }
+        .ai-content h3 { font-size: 1rem; }
+        .ai-content strong { color: #fff; font-weight: 600; }
+        .ai-content a { color: #a5c8ff; text-decoration: underline; text-underline-offset: 2px; }
+        .ai-content ul, .ai-content ol { margin: 0.65rem 0; padding-left: 1.5rem; }
+        .ai-content ul { list-style: disc; }
+        .ai-content ol { list-style: decimal; }
+        .ai-content li { margin: 0.25rem 0; padding-left: 0.15rem; }
+        .ai-content blockquote {
+            border-left: 2px solid #555;
+            color: #b8b8b8;
+            margin: 0.75rem 0;
+            padding-left: 0.9rem;
+        }
+        .ai-content code {
+            border: 1px solid #2c2c2c;
+            border-radius: 0.35rem;
+            background: #141414;
+            color: #e5e7eb;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.86em;
+            padding: 0.12rem 0.35rem;
+        }
+        .ai-content pre {
+            background: #111;
+            border: 1px solid #262626;
+            border-radius: 0.75rem;
+            margin: 0.75rem 0;
+            overflow-x: auto;
+            padding: 0.85rem 1rem;
+        }
+        .ai-content pre code { background: transparent; border: 0; padding: 0; }
+        .markdown-table-wrap { margin: 0.85rem 0; max-width: 100%; overflow-x: auto; }
+        .ai-content table { border-collapse: collapse; min-width: 100%; text-align: left; }
+        .ai-content th, .ai-content td {
+            border: 1px solid #303030;
+            padding: 0.55rem 0.75rem;
+            vertical-align: top;
+        }
+        .ai-content th { background: #171717; color: #fff; font-weight: 600; }
+        .ai-content tr:nth-child(even) td { background: #0d0d0d; }
+
         .input-glow {
             background: radial-gradient(circle, rgba(255,255,255,0.03) 0%, rgba(0,0,0,0) 70%);
         }
@@ -211,9 +289,14 @@
         </header>
         
         <!-- Chat Area (Initially Hidden) -->
-        <div id="chatArea" class="w-full max-w-3xl mx-auto pt-20 pb-4 px-4 overflow-y-auto flex-col gap-6 hidden opacity-0 transition-opacity duration-700 z-10 scroll-smooth" style="flex: 1 1 0%;">
+        <div id="chatArea" class="w-full pt-20 pb-4 px-4 overflow-y-auto flex-col gap-6 hidden opacity-0 transition-opacity duration-700 z-10 scroll-smooth" style="flex: 1 1 0%;" tabindex="0" aria-label="Conversation">
             <!-- Messages will be injected here by JS -->
         </div>
+
+        <button id="jumpToLatestBtn" type="button" class="hidden absolute right-5 bottom-28 z-30 items-center gap-2 rounded-full border border-white/10 bg-[#171717] px-4 py-2 text-xs text-gray-200 shadow-lg transition-colors hover:bg-[#242424] focus:outline-none focus:ring-2 focus:ring-white/30" aria-label="Jump to the latest response">
+            <i data-lucide="arrow-down" class="w-4 h-4"></i>
+            <span>Jump to latest</span>
+        </button>
 
         <!-- Center Input Section -->
         <div id="inputSectionContainer" class="flex-1 flex items-center justify-center p-4 relative w-full transition-all duration-700 ease-[cubic-bezier(0.16,1,0.3,1)]">
@@ -413,12 +496,82 @@
 
         // New Chat Elements
         const chatArea = document.getElementById('chatArea');
+        const jumpToLatestBtn = document.getElementById('jumpToLatestBtn');
         const inputSectionContainer = document.getElementById('inputSectionContainer');
         const mainInputContainer = document.getElementById('mainInputContainer');
         let isChatActive = false;
         const chatHistory = [];
         let conversationId = 0;
         let tripIntakePending = false; // backend asked for origin/destination; next message is the answer
+        let responseIsStreaming = false;
+        let followLatest = true;
+        let chatScrollFrame = 0;
+        let touchStartY = null;
+
+        function isNearChatBottom() {
+            return chatArea.scrollHeight - chatArea.clientHeight - chatArea.scrollTop < 72;
+        }
+
+        function updateJumpToLatestButton() {
+            const visible = responseIsStreaming && !followLatest;
+            jumpToLatestBtn.classList.toggle('hidden', !visible);
+            jumpToLatestBtn.classList.toggle('flex', visible);
+        }
+
+        function scrollChatToLatest(behavior = 'auto') {
+            if (!followLatest) return;
+            if (chatScrollFrame) cancelAnimationFrame(chatScrollFrame);
+            chatScrollFrame = requestAnimationFrame(() => {
+                chatScrollFrame = 0;
+                if (followLatest) chatArea.scrollTo({ top: chatArea.scrollHeight, behavior });
+            });
+        }
+
+        function setFollowLatest(shouldFollow, behavior = 'auto') {
+            followLatest = shouldFollow;
+            chatArea.style.scrollBehavior = shouldFollow ? '' : 'auto';
+            if (!shouldFollow && chatScrollFrame) {
+                cancelAnimationFrame(chatScrollFrame);
+                chatScrollFrame = 0;
+            }
+            updateJumpToLatestButton();
+            if (shouldFollow) scrollChatToLatest(behavior);
+        }
+
+        jumpToLatestBtn.addEventListener('click', () => setFollowLatest(true, 'smooth'));
+        chatArea.addEventListener('scroll', () => {
+            updateJumpToLatestButton();
+        }, { passive: true });
+        chatArea.addEventListener('wheel', event => {
+            if (event.deltaY < 0 && responseIsStreaming) setFollowLatest(false);
+            else if (event.deltaY > 0 && responseIsStreaming && isNearChatBottom()) setFollowLatest(true);
+        }, { passive: true });
+        chatArea.addEventListener('touchstart', event => {
+            touchStartY = event.touches[0]?.clientY ?? null;
+        }, { passive: true });
+        chatArea.addEventListener('touchmove', event => {
+            const nextY = event.touches[0]?.clientY;
+            if (touchStartY !== null && nextY !== undefined) {
+                if (nextY > touchStartY && chatArea.scrollTop > 0) setFollowLatest(false);
+                else if (nextY < touchStartY && isNearChatBottom()) setFollowLatest(true);
+                touchStartY = nextY;
+            }
+        }, { passive: true });
+        chatArea.addEventListener('touchend', () => { touchStartY = null; }, { passive: true });
+        chatArea.addEventListener('pointerdown', event => {
+            const bounds = chatArea.getBoundingClientRect();
+            if (event.clientX >= bounds.right - 14) setFollowLatest(false);
+        });
+        window.addEventListener('pointerup', () => {
+            if (responseIsStreaming && isNearChatBottom()) setFollowLatest(true);
+        });
+        chatArea.addEventListener('keydown', event => {
+            if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) && responseIsStreaming) {
+                setFollowLatest(false);
+            } else if (['ArrowDown', 'PageDown', 'End'].includes(event.key) && responseIsStreaming && isNearChatBottom()) {
+                setFollowLatest(true);
+            }
+        });
 
         // Sidebar Elements
         const sidebar = document.getElementById('sidebar');
@@ -449,6 +602,8 @@
             conversationId++;
             chatHistory.length = 0;
             tripIntakePending = false;
+            responseIsStreaming = false;
+            updateJumpToLatestButton();
             messageInput.disabled = false;
             sendBtn.disabled = false;
 
@@ -615,7 +770,7 @@
         // Append User Message Helper
         function appendUserMessage(content) {
             const msgDiv = document.createElement('div');
-            msgDiv.className = `flex w-full animate-fade-in-up justify-end`;
+            msgDiv.className = `chat-message-row flex w-full animate-fade-in-up justify-end`;
             
             const innerDiv = document.createElement('div');
             innerDiv.className = 'max-w-[75%] bg-[#222] text-white px-5 py-3 rounded-2xl rounded-tr-sm text-sm font-light leading-relaxed shadow-md';
@@ -624,16 +779,13 @@
             msgDiv.appendChild(innerDiv);
             chatArea.appendChild(msgDiv);
             
-            // Scroll to bottom
-            setTimeout(() => {
-                chatArea.scrollTop = chatArea.scrollHeight;
-            }, 50);
+            setFollowLatest(true, 'smooth');
         }
 
         // Append AI Message Skeleton
         function appendAIMessage() {
             const msgDiv = document.createElement('div');
-            msgDiv.className = `flex w-full animate-fade-in-up justify-start`;
+            msgDiv.className = `chat-message-row flex w-full animate-fade-in-up justify-start`;
             
             const innerDiv = document.createElement('div');
             innerDiv.className = 'flex w-full max-w-[85%] items-start gap-2 text-gray-200 text-sm font-light leading-relaxed';
@@ -648,7 +800,7 @@
                     </button>
                     <div class="thinking-log" aria-label="Live backend activity"></div>
                     <!-- Final text content container -->
-                    <div class="ai-content leading-relaxed" style="white-space:pre-wrap;"></div>
+                    <div class="ai-content leading-relaxed"></div>
                     <!-- Logo-card citations (no numbers) -->
                     <div class="sources-row" style="display:none;"></div>
                 </div>
@@ -656,7 +808,7 @@
             
             msgDiv.appendChild(innerDiv);
             chatArea.appendChild(msgDiv);
-            setTimeout(() => { chatArea.scrollTop = chatArea.scrollHeight; }, 50);
+            scrollChatToLatest();
 
             const statusNode = msgDiv.querySelector('.ai-status');
             const statusTextNode = msgDiv.querySelector('.status-text');
@@ -856,12 +1008,151 @@
             container.appendChild(card);
         }
 
+        function renderInlineMarkdown(value) {
+            const placeholders = [];
+            const reserve = html => {
+                const token = `\uE000${placeholders.length}\uE001`;
+                placeholders.push([token, html]);
+                return token;
+            };
+            let text = escapeHtml(value);
+            text = text.replace(/`([^`\n]+)`/g, (_, code) =>
+                reserve(`<code>${code}</code>`));
+            text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (match, label, escapedUrl) => {
+                try {
+                    const url = new URL(escapedUrl.replace(/&amp;/g, '&'));
+                    if (!['http:', 'https:'].includes(url.protocol)) return match;
+                    return reserve(`<a href="${escapeHtml(url.href)}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+                } catch {
+                    return match;
+                }
+            });
+            text = text
+                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                .replace(/__(.+?)__/g, '<strong>$1</strong>')
+                .replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s).,!?:;])/g, '$1<em>$2</em>');
+            for (const [token, html] of placeholders) text = text.replace(token, html);
+            return text;
+        }
+
+        function renderMarkdown(markdown) {
+            const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
+            const output = [];
+            let paragraph = [];
+            let listItems = [];
+            let listTag = '';
+            let codeLines = [];
+            let inCode = false;
+
+            const flushParagraph = () => {
+                if (!paragraph.length) return;
+                output.push(`<p>${paragraph.map(renderInlineMarkdown).join('<br>')}</p>`);
+                paragraph = [];
+            };
+            const flushList = () => {
+                if (!listItems.length) return;
+                output.push(`<${listTag}>${listItems.map(item => `<li>${renderInlineMarkdown(item)}</li>`).join('')}</${listTag}>`);
+                listItems = [];
+                listTag = '';
+            };
+            const flushTextBlocks = () => {
+                flushParagraph();
+                flushList();
+            };
+            const tableCells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim());
+            const isTableDivider = line => {
+                const cells = tableCells(line);
+                return cells.length > 1 && cells.every(cell => /^:?-{3,}:?$/.test(cell.replace(/\s/g, '')));
+            };
+
+            for (let index = 0; index < lines.length; index++) {
+                const line = lines[index];
+                if (/^\s*```/.test(line)) {
+                    flushTextBlocks();
+                    if (inCode) {
+                        output.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+                        codeLines = [];
+                        inCode = false;
+                    } else {
+                        inCode = true;
+                    }
+                    continue;
+                }
+                if (inCode) {
+                    codeLines.push(line);
+                    continue;
+                }
+                if (!line.trim()) {
+                    flushTextBlocks();
+                    continue;
+                }
+
+                if (index + 1 < lines.length && line.includes('|') && isTableDivider(lines[index + 1])) {
+                    flushTextBlocks();
+                    const headers = tableCells(line);
+                    const rows = [];
+                    index += 2;
+                    while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+                        rows.push(tableCells(lines[index]));
+                        index++;
+                    }
+                    index--;
+                    const head = headers.map(cell => `<th scope="col">${renderInlineMarkdown(cell)}</th>`).join('');
+                    const body = rows.map(row => `<tr>${headers.map((_, col) => `<td>${renderInlineMarkdown(row[col] || '')}</td>`).join('')}</tr>`).join('');
+                    output.push(`<div class="markdown-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
+                    continue;
+                }
+
+                const heading = line.match(/^\s{0,3}(#{1,3})\s+(.+?)\s*#*\s*$/);
+                if (heading) {
+                    flushTextBlocks();
+                    const level = heading[1].length;
+                    output.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+                    continue;
+                }
+                if (/^\s{0,3}(---+|\*\*\*+|___+)\s*$/.test(line)) {
+                    flushTextBlocks();
+                    output.push('<hr>');
+                    continue;
+                }
+                if (/^\s{0,3}>/.test(line)) {
+                    flushTextBlocks();
+                    const quoteLines = [];
+                    while (index < lines.length && /^\s{0,3}>/.test(lines[index])) {
+                        quoteLines.push(lines[index++].replace(/^\s{0,3}>\s?/, ''));
+                    }
+                    index--;
+                    output.push(`<blockquote><p>${quoteLines.map(renderInlineMarkdown).join('<br>')}</p></blockquote>`);
+                    continue;
+                }
+
+                const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+                const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+                if (unordered || ordered) {
+                    flushParagraph();
+                    const nextTag = unordered ? 'ul' : 'ol';
+                    if (listTag && listTag !== nextTag) flushList();
+                    listTag = nextTag;
+                    listItems.push((unordered || ordered)[1]);
+                    continue;
+                }
+                flushList();
+                paragraph.push(line);
+            }
+
+            flushTextBlocks();
+            if (inCode) output.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+            return output.join('');
+        }
+
         // Send the user's message and recent conversation to the real AI backend.
         async function handleAIResponse(prompt, aiNodes, history, requestConversationId) {
             const statusContainer = aiNodes.statusNode;
             const contentNode = aiNodes.contentNode;
             const thinkingOrbHost = aiNodes.orbHost;
             const statusTextNode = aiNodes.statusTextNode;
+            responseIsStreaming = true;
+            updateJumpToLatestButton();
             showThinkingOrb(thinkingOrbHost, 'connecting');
             messageInput.disabled = true;
             sendBtn.disabled = true;
@@ -883,6 +1174,17 @@
 
                 let reply = '';
                 let structuredRendered = false;
+                let markdownRenderFrame = 0;
+                const scheduleMarkdownRender = () => {
+                    if (structuredRendered || markdownRenderFrame) return;
+                    markdownRenderFrame = requestAnimationFrame(() => {
+                        markdownRenderFrame = 0;
+                        if (!structuredRendered) {
+                            contentNode.innerHTML = renderMarkdown(reply);
+                            scrollChatToLatest();
+                        }
+                    });
+                };
                 const contentType = response.headers.get('content-type') || '';
                 if (contentType.includes('text/event-stream') && response.body) {
                     const reader = response.body.getReader();
@@ -910,22 +1212,24 @@
                             // Live backend detail appears in the trace when the label is clicked.
                             aiNodes.setThinking(data.status, data.detail || data.tool || '');
                             setOrbForBackendStatus(thinkingOrbHost, data.status);
-                            chatArea.scrollTop = chatArea.scrollHeight;
+                            scrollChatToLatest();
                             return;
                         }
                         if (data.itinerary && typeof data.itinerary === 'object') {
                             if (requestConversationId !== conversationId) return;
                             structuredRendered = true;
+                            if (markdownRenderFrame) cancelAnimationFrame(markdownRenderFrame);
+                            markdownRenderFrame = 0;
                             renderItinerary(contentNode, data.itinerary, data.assumptions || [], data.validation_notes || [], data.plan_status || '');
-                            chatArea.scrollTop = chatArea.scrollHeight;
+                            scrollChatToLatest();
                             return;
                         }
                         if (typeof data.token === 'string' && data.token) {
                             if (requestConversationId !== conversationId) return;
                             reply += data.token;
                             showThinkingOrb(thinkingOrbHost, 'composing');
-                            if (!structuredRendered) contentNode.textContent += data.token;
-                            chatArea.scrollTop = chatArea.scrollHeight;
+                            scheduleMarkdownRender();
+                            scrollChatToLatest();
                         }
                     };
 
@@ -941,6 +1245,10 @@
                             break;
                         }
                     }
+                    if (markdownRenderFrame) cancelAnimationFrame(markdownRenderFrame);
+                    markdownRenderFrame = 0;
+                    if (!structuredRendered) contentNode.innerHTML = renderMarkdown(reply);
+                    scrollChatToLatest();
                 } else {
                     throw new Error('The chat server returned an unexpected response format.');
                 }
@@ -958,6 +1266,8 @@
                 contentNode.textContent = `I couldn't get an AI response: ${error.message}`;
             } finally {
                 if (requestConversationId === conversationId) {
+                    responseIsStreaming = false;
+                    updateJumpToLatestButton();
                     messageInput.disabled = false;
                     sendBtn.disabled = false;
                 }
