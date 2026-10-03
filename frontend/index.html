@@ -109,6 +109,64 @@
                 color: #b8b8b8;
             }
         }
+        /* Clickable thinking label (Claude-style) + live backend log */
+        .thinking-toggle {
+            cursor: pointer;
+            background: transparent;
+            border: 0;
+            padding: 0;
+            text-align: left;
+        }
+        .thinking-toggle:hover .status-text {
+            color: #fff;
+        }
+        .thinking-log {
+            display: none;
+            margin-top: 6px;
+            border: 1px solid #222;
+            border-radius: 12px;
+            background: #0a0a0a;
+            padding: 8px 10px;
+            max-height: 220px;
+            overflow-y: auto;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+        .thinking-log.open { display: block; }
+        .thinking-log-entry { padding: 4px 0; border-bottom: 1px solid #161616; color: #b8b8b8; }
+        .thinking-log-entry:last-child { border-bottom: 0; }
+        .thinking-log-entry .phase { color: #fff; font-weight: 500; }
+        .thinking-log-entry .ts { color: #555; font-size: 11px; margin-left: 6px; }
+        .thinking-log-entry .detail { color: #888; display: block; word-break: break-word; }
+        /* Logo-card citations (no numbers) */
+        .sources-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .source-card {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #101010;
+            border: 1px solid #222;
+            border-radius: 12px;
+            padding: 6px 10px 6px 6px;
+            max-width: 240px;
+            text-decoration: none;
+            color: #ddd;
+            transition: border-color 0.2s, background 0.2s;
+        }
+        .source-card:hover { border-color: #444; background: #161616; }
+        .source-card img {
+            width: 22px; height: 22px; border-radius: 6px; background: #fff; flex: 0 0 22px;
+        }
+        .source-card .src-title {
+            font-size: 12px; line-height: 1.3; color: #eee;
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+        }
+        .source-card .src-domain { font-size: 11px; color: #777; }
     </style>
 </head>
 <body class="h-screen w-screen overflow-hidden flex bg-[#030303] text-white">
@@ -549,7 +607,7 @@
             
             // Setup empty AI Response Node & Trigger Streaming Handler
             const aiNodes = appendAIMessage();
-            handleAIResponse(text, aiNodes.statusNode, aiNodes.contentNode, aiNodes.orbHost, requestHistory, requestConversationId);
+            handleAIResponse(text, aiNodes, requestHistory, requestConversationId);
         }
 
         // Send Button Click
@@ -583,12 +641,17 @@
             innerDiv.innerHTML = `
                 <span class="thinking-orb-host mt-0.5" aria-hidden="true"></span>
                 <div class="min-w-0 flex-1 space-y-2">
-                    <!-- Plain-text activity label sits beside the orb while generating. -->
-                    <div class="ai-status min-h-6 flex items-center" style="display:none;" aria-live="polite">
+                    <!-- Clickable thinking label: live backend trace, Claude-style. Click to expand/collapse. -->
+                    <button class="ai-status thinking-toggle min-h-6 flex items-center" style="display:none;" aria-live="polite" title="Show live backend activity">
                         <span class="status-text shimmer"></span>
-                    </div>
+                        <span class="thinking-elapsed" style="margin-left:8px;color:#555;font-size:12px;"></span>
+                        <span class="thinking-caret" style="margin-left:6px;color:#555;font-size:12px;">▾</span>
+                    </button>
+                    <div class="thinking-log" aria-label="Live backend activity"></div>
                     <!-- Final text content container -->
-                    <div class="ai-content leading-relaxed"></div>
+                    <div class="ai-content leading-relaxed" style="white-space:pre-wrap;"></div>
+                    <!-- Logo-card citations (no numbers) -->
+                    <div class="sources-row" style="display:none;"></div>
                 </div>
             `;
             
@@ -596,12 +659,106 @@
             chatArea.appendChild(msgDiv);
             setTimeout(() => { chatArea.scrollTop = chatArea.scrollHeight; }, 50);
 
+            const statusNode = msgDiv.querySelector('.ai-status');
+            const statusTextNode = msgDiv.querySelector('.status-text');
+            const elapsedNode = msgDiv.querySelector('.thinking-elapsed');
+            const logNode = msgDiv.querySelector('.thinking-log');
+            const thinkingLog = [];
+            const thinkStart = Date.now();
+            let thinkDone = false;
+            let elapsedTimer = setInterval(() => {
+                if (thinkDone) { clearInterval(elapsedTimer); return; }
+                elapsedNode.textContent = fmtElapsed(Date.now() - thinkStart);
+            }, 1000);
+            statusNode.addEventListener('click', () => {
+                logNode.classList.toggle('open');
+            });
+
+            function fmtElapsed(ms) {
+                const s = Math.floor(ms / 1000);
+                return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+            }
+
+            function setThinking(label, detail) {
+                // Single path for every live backend update: label + trace entry.
+                statusTextNode.textContent = label;
+                statusNode.style.display = 'flex';
+                pushThinking(label, detail);
+            }
+
+            function pushThinking(label, detail) {
+                const ts = new Date().toLocaleTimeString();
+                thinkingLog.push({ label, detail: detail || '', ts });
+                if (thinkingLog.length > 60) thinkingLog.shift();
+                logNode.innerHTML = thinkingLog.map(e => `
+                    <div class="thinking-log-entry">
+                        <span class="phase">${escapeHtml(e.label)}</span>
+                        <span class="ts">${escapeHtml(e.ts)}</span>
+                        ${e.detail ? `<span class="detail">${escapeHtml(e.detail)}</span>` : ''}
+                    </div>
+                `).join('');
+                // Claude-style: trace auto-expands while work is live.
+                if (!thinkDone) logNode.classList.add('open');
+                logNode.scrollTop = logNode.scrollHeight;
+            }
+
+            function markThinkingDone() {
+                thinkDone = true;
+                clearInterval(elapsedTimer);
+                elapsedNode.textContent = `done in ${fmtElapsed(Date.now() - thinkStart)}`;
+                statusTextNode.textContent = `Thinking history (${thinkingLog.length}) — click to view`;
+                statusTextNode.classList.remove('shimmer');
+                statusNode.style.display = 'flex';
+                // Collapse so the answer reads first; full trace stays one click away.
+                logNode.classList.remove('open');
+            }
+
+            function renderSources(sources) {
+                const row = msgDiv.querySelector('.sources-row');
+                if (!Array.isArray(sources) || !sources.length) return;
+                const seen = new Set([...row.querySelectorAll('a')].map(a => a.href));
+                sources.forEach(s => {
+                    if (!s || !s.url) return;
+                    if (seen.has(s.url)) return;
+                    seen.add(s.url);
+                    const a = document.createElement('a');
+                    a.className = 'source-card';
+                    a.href = s.url;
+                    a.target = '_blank';
+                    a.rel = 'noopener noreferrer';
+                    const domain = s.domain || safeDomain(s.url);
+                    const logo = `https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(domain)}`;
+                    a.innerHTML = `
+                        <img src="${logo}" alt="" loading="lazy" onerror="this.style.display='none'" />
+                        <span><span class="src-title">${escapeHtml(s.title || domain)}</span><br/><span class="src-domain">${escapeHtml(domain)}</span></span>
+                    `;
+                    row.appendChild(a);
+                });
+                if (row.children.length) row.style.display = 'flex';
+            }
+
             return {
-                statusNode: msgDiv.querySelector('.ai-status'),
+                statusNode,
                 orbHost: msgDiv.querySelector('.thinking-orb-host'),
-                statusTextNode: msgDiv.querySelector('.status-text'),
-                contentNode: msgDiv.querySelector('.ai-content')
+                statusTextNode,
+                contentNode: msgDiv.querySelector('.ai-content'),
+                logNode,
+                setThinking,
+                pushThinking,
+                markThinkingDone,
+                renderSources
             };
+        }
+
+        function escapeHtml(s) {
+            return String(s || '').replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
+        }
+
+        function safeDomain(url) {
+            try { return new URL(url).hostname.replace(/^www\./, ''); }
+            catch { return String(url || '').slice(0, 40); }
         }
 
         function isTripPlanningRequest(message) {
@@ -618,7 +775,10 @@
             return /\b(?:cancel|stop|never mind|nevermind|forget it|skip it|don't(?: want to)? plan|do not(?: want to)? plan|rather not plan)\b/i.test(String(message || ''));
         }
 
-        async function streamTripJob(jobId, statusContainer, statusTextNode, thinkingOrbHost, requestConversationId) {
+        async function streamTripJob(jobId, aiNodes, requestConversationId) {
+            const statusContainer = aiNodes.statusNode;
+            const statusTextNode = aiNodes.statusTextNode;
+            const thinkingOrbHost = aiNodes.orbHost;
             const response = await fetch(`${BACKEND_URL}/trips/${encodeURIComponent(jobId)}/stream`, {
                 headers: { 'Accept': 'text/event-stream' }
             });
@@ -648,9 +808,10 @@
                     return;
                 }
                 if (data.phase && requestConversationId === conversationId) {
-                    const phaseLabel = data.detail || data.phase.replace(/\b\w/g, letter => letter.toUpperCase());
-                    statusTextNode.textContent = phaseLabel || 'Planning your trip';
-                    statusContainer.style.display = 'flex';
+                    const prettyPhase = String(data.phase).replace(/\b\w/g, letter => letter.toUpperCase());
+                    const phaseLabel = data.detail || prettyPhase || 'Planning your trip';
+                    // One path: label shows latest backend step, trace keeps everything.
+                    aiNodes.setThinking(phaseLabel, data.detail && data.detail !== phaseLabel ? `${data.phase}: ${data.detail}` : `backend phase: ${data.phase}`);
                     setOrbForBackendStatus(thinkingOrbHost, data.phase);
                     chatArea.scrollTop = chatArea.scrollHeight;
                 }
@@ -673,7 +834,6 @@
             if (jobResult.status !== 'done') {
                 throw new Error(jobResult.error || 'Trip planning did not complete.');
             }
-            statusContainer.style.display = 'none';
             showThinkingOrb(thinkingOrbHost, 'breathing');
             return jobResult;
         }
@@ -713,13 +873,15 @@
         }
 
         // Send the user's message and recent conversation to the real AI backend.
-        async function handleAIResponse(prompt, statusContainer, contentNode, thinkingOrbHost, history, requestConversationId) {
-            const statusTextNode = statusContainer.querySelector('.status-text');
+        async function handleAIResponse(prompt, aiNodes, history, requestConversationId) {
+            const statusContainer = aiNodes.statusNode;
+            const contentNode = aiNodes.contentNode;
+            const thinkingOrbHost = aiNodes.orbHost;
+            const statusTextNode = aiNodes.statusTextNode;
             const cancelPendingTrip = tripIntakePending && isTripPlanningCancellation(prompt);
             if (cancelPendingTrip) tripIntakePending = false;
             const useTripJobFlow = !cancelPendingTrip && (tripIntakePending || isTripPlanningRequest(prompt));
-            statusTextNode.textContent = 'Connecting';
-            statusContainer.style.display = 'flex';
+            aiNodes.setThinking('Connecting', `POST ${useTripJobFlow ? '/trips/from-chat' : '/chat'}`);
             showThinkingOrb(thinkingOrbHost, useTripJobFlow ? 'working' : 'connecting');
             messageInput.disabled = true;
             sendBtn.disabled = true;
@@ -732,7 +894,10 @@
                     body: JSON.stringify({ message: prompt, history })
                 });
                 if (requestConversationId !== conversationId) return;
-                statusTextNode.textContent = useTripJobFlow ? 'Reading trip details' : 'Thinking';
+                aiNodes.setThinking(
+                    useTripJobFlow ? 'Reading trip details' : 'Thinking',
+                    'waiting for backend response'
+                );
                 if (!response.ok) {
                     const data = await response.json().catch(() => ({}));
                     const message = response.status === 404
@@ -753,13 +918,17 @@
                         } else if (data.job_id) {
                             tripIntakePending = false;
                             const assumptions = Array.isArray(data.assumptions) ? data.assumptions : [];
-                            statusTextNode.textContent = assumptions.length
-                                ? `Starting planner: ${assumptions.join('; ')}`
-                                : 'Starting trip planner';
-                            statusContainer.style.display = 'flex';
+                            aiNodes.setThinking(
+                                assumptions.length ? `Starting planner: ${assumptions.join('; ')}` : 'Starting trip planner',
+                                (assumptions || []).join('; ') || 'trip job created, opening live stream'
+                            );
                             setOrbForBackendStatus(thinkingOrbHost, 'orchestrating');
-                            const job = await streamTripJob(data.job_id, statusContainer, statusTextNode, thinkingOrbHost, requestConversationId);
+                            const job = await streamTripJob(data.job_id, aiNodes, requestConversationId);
                             reply = formatTripPlannerReply(job, assumptions);
+                            // Trip planner sources (if backend returns them in future) render as logo cards.
+                            if (job && job.result && Array.isArray(job.result.sources)) {
+                                aiNodes.renderSources(job.result.sources);
+                            }
                         } else {
                             throw new Error(data.detail || 'The trip planner did not return a job.');
                         }
@@ -767,7 +936,7 @@
                         reply = typeof data.reply === 'string' ? data.reply.trim() : '';
                     }
                     contentNode.textContent = reply;
-                    statusContainer.style.display = 'none';
+                    aiNodes.markThinkingDone();
                     showThinkingOrb(thinkingOrbHost, 'breathing');
                 } else if (contentType.includes('text/event-stream') && response.body) {
                     const reader = response.body.getReader();
@@ -781,10 +950,15 @@
                         if (rawData === '[DONE]') return;
                         const data = JSON.parse(rawData);
                         if (data.error) throw new Error(data.error);
+                        if (Array.isArray(data.sources)) {
+                            if (requestConversationId !== conversationId) return;
+                            aiNodes.renderSources(data.sources);
+                            return;
+                        }
                         if (typeof data.status === 'string' && data.status) {
                             if (requestConversationId !== conversationId) return;
-                            statusTextNode.textContent = data.status;
-                            statusContainer.style.display = 'flex';
+                            // Live backend detail appears in the trace when the label is clicked.
+                            aiNodes.setThinking(data.status, data.detail || data.tool || '');
                             setOrbForBackendStatus(thinkingOrbHost, data.status);
                             chatArea.scrollTop = chatArea.scrollHeight;
                             return;
@@ -792,7 +966,6 @@
                         if (typeof data.token === 'string' && data.token) {
                             if (requestConversationId !== conversationId) return;
                             reply += data.token;
-                            statusContainer.style.display = 'none';
                             showThinkingOrb(thinkingOrbHost, 'composing');
                             contentNode.textContent += data.token;
                             chatArea.scrollTop = chatArea.scrollHeight;
@@ -817,13 +990,13 @@
 
                 if (requestConversationId !== conversationId) return;
                 showThinkingOrb(thinkingOrbHost, 'breathing');
-                statusContainer.style.display = 'none';
+                aiNodes.markThinkingDone();
                 if (!reply.trim()) throw new Error('The AI returned an empty response. Please try again.');
                 chatHistory.push({ role: 'assistant', content: reply.trim() });
             } catch (error) {
                 if (requestConversationId !== conversationId) return;
                 console.error('AI chat request failed:', error);
-                statusContainer.style.display = 'none';
+                aiNodes.markThinkingDone();
                 showThinkingOrb(thinkingOrbHost, 'breathing');
                 contentNode.textContent = `I couldn't get an AI response: ${error.message}`;
             } finally {
