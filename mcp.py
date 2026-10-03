@@ -29,7 +29,7 @@ from datetime import date, datetime, time, timedelta
 from enum import Enum
 from typing import Callable, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger("trip_planner.mcp")
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +46,16 @@ class TravelMode(str, Enum):
     CAR = "car"
     FERRY = "ferry"
     WALK = "walk"
+
+
+def _naive_time(value: time) -> time:
+    """Drop any timezone offset so every time compares with the naive times
+    the validators build. The LLM can return times like '09:00+05:30' or
+    '09:00Z'; Pydantic keeps that offset, and comparing an aware time with a
+    naive one raises "can't compare offset-naive and offset-aware times"."""
+    if isinstance(value, time) and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
 
 
 class CityStop(BaseModel):
@@ -75,6 +85,11 @@ class TripConstraints(BaseModel):
     notes: Optional[str] = None
     attachment_ids: List[str] = Field(default_factory=list)
 
+    @field_validator("daily_start_time", "daily_end_time")
+    @classmethod
+    def _strip_tz(cls, v: time) -> time:
+        return _naive_time(v)
+
     @property
     def trip_days(self) -> int:
         return (self.end_date - self.start_date).days + 1
@@ -93,6 +108,11 @@ class Activity(BaseModel):
     )
     notes: Optional[str] = None
 
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def _strip_tz(cls, v: time) -> time:
+        return _naive_time(v)
+
 
 class TransferLeg(BaseModel):
     from_city: str
@@ -102,6 +122,11 @@ class TransferLeg(BaseModel):
     depart_time: time
     arrive_time: time
     estimated_cost: float = 0.0
+
+    @field_validator("depart_time", "arrive_time")
+    @classmethod
+    def _strip_tz(cls, v: time) -> time:
+        return _naive_time(v)
 
 
 class DayPlan(BaseModel):
