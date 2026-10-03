@@ -692,7 +692,6 @@
                 logNode.innerHTML = thinkingLog.map(e => `
                     <div class="thinking-log-entry">
                         <span class="phase">${escapeHtml(e.label)}</span>
-                        <span class="ts">${escapeHtml(e.ts)}</span>
                         ${e.detail ? `<span class="detail">${escapeHtml(e.detail)}</span>` : ''}
                     </div>
                 `).join('');
@@ -704,11 +703,18 @@
             function markThinkingDone() {
                 thinkDone = true;
                 clearInterval(elapsedTimer);
-                elapsedNode.textContent = `done in ${fmtElapsed(Date.now() - thinkStart)}`;
-                statusTextNode.textContent = `Thinking history (${thinkingLog.length}) — click to view`;
+                elapsedNode.textContent = '';
                 statusTextNode.classList.remove('shimmer');
+                if (!thinkingLog.length) {
+                    statusNode.style.display = 'none';
+                    return;
+                }
+                const secs = Math.max(1, Math.round((Date.now() - thinkStart) / 1000));
+                statusTextNode.textContent = secs >= 60
+                    ? `Worked for ${Math.floor(secs / 60)}m ${secs % 60}s`
+                    : `Worked for ${secs}s`;
                 statusNode.style.display = 'flex';
-                // Collapse so the answer reads first; full trace stays one click away.
+                // Collapse so the answer reads first; the steps stay one click away.
                 logNode.classList.remove('open');
             }
 
@@ -856,7 +862,6 @@
             const contentNode = aiNodes.contentNode;
             const thinkingOrbHost = aiNodes.orbHost;
             const statusTextNode = aiNodes.statusTextNode;
-            aiNodes.setThinking('Connecting', 'POST /chat');
             showThinkingOrb(thinkingOrbHost, 'connecting');
             messageInput.disabled = true;
             sendBtn.disabled = true;
@@ -868,7 +873,6 @@
                     body: JSON.stringify({ message: prompt, history, trip_pending: tripIntakePending })
                 });
                 if (requestConversationId !== conversationId) return;
-                aiNodes.setThinking('Thinking', 'waiting for backend response');
                 if (!response.ok) {
                     const data = await response.json().catch(() => ({}));
                     const message = response.status === 404
