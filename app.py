@@ -30,7 +30,6 @@ Env vars:
     GLM_PLANNING_MAX_TOKENS default: 16384 (structured itinerary drafts)
     RESEARCH_MAX_ITERATIONS default: 5 (research-agent tool steps per pass)
     RESEARCH_TIMEOUT_SECONDS default: 150 (fail fast instead of hanging)
-    TRIP_MAX_ITERATIONS   default: 2 (UI /trips/from-chat passes; /trips default 4)
     GEOCODE_TIMEOUT_SECONDS default: 5 (Nominatim lookup cap per city)
     GLM_VISION_MODEL      default: z-ai/glm-5.3-flash  (multimodal -- used for image uploads)
     TAVILY_API_KEY        optional. Better web search than the DuckDuckGo fallback.
@@ -64,7 +63,7 @@ import mimetypes
 import os
 import sys
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
@@ -283,8 +282,9 @@ def _extract_file_text(path: Path, content_type: str) -> str:
 # One asyncio.Queue per in-flight job. plan_trip() and everything it calls
 # push an event here *at the moment that real step actually starts* -- these
 # are not simulated/timed phases, they're emitted from inside the real
-# research-agent callbacks and the real validators. GET /trips/{job_id}/stream
-# drains this queue and relays each event to the browser as SSE.
+# research-agent callbacks and the real validators. No HTTP route drains these
+# queues any more (the job endpoints were removed); /trips/sync passes no job_id,
+# so these emits are currently no-ops.
 #
 # Each status phase corresponds to one real backend action:
 #   architecting    -- building the research agent (tools + prompt), once per process
@@ -552,9 +552,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-jobs: Dict[str, dict] = {}  # job_id -> {status, result, error}
-
-
 @app.on_event("startup")
 async def _warmup_agent_tools():
     """Pre-connect MCP servers at boot (in the background) so the first
@@ -582,21 +579,6 @@ class ChatTurn(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=5000)
     history: List[ChatTurn] = Field(default_factory=list)
-
-
-class TripChatIntake(BaseModel):
-    """Trip details extracted from a natural-language chat request."""
-    origin_city: Optional[str] = None
-    destinations: List[CityStop] = Field(default_factory=list)
-    start_date: Optional[date] = None
-    end_date: Optional[date] = None
-    duration_days: Optional[int] = Field(default=None, ge=1, le=30)
-    total_budget: Optional[float] = Field(default=None, gt=0)
-    currency: Optional[str] = None
-    travelers: Optional[int] = Field(default=None, ge=1, le=20)
-    pace: Optional[str] = None
-    preferences: List[str] = Field(default_factory=list)
-    notes: Optional[str] = None
 
 
 @app.get("/health")
@@ -760,179 +742,6 @@ async def list_uploads():
 
 
 # ---- trip planning ---------------------------------------------------------
-
-
-@app.post("/trips")
-async def create_trip(request: TripRequest):
-    """Kick off planning in the background; poll GET /trips/{job_id}, or
-    watch it live via GET /trips/{job_id}/stream."""
-    job_id = str(uuid.uuid4())
-    jobs[job_id] = {"status": "running", "result": None, "error": None}
-    job_queues[job_id] = asyncio.Queue()
-
-    constraints = TripConstraints(**request.model_dump(exclude={"max_iterations"}))
-
-    async def _run():
-        try:
-            result = await plan_trip(constraints, max_iterations=request.max_iterations, job_id=job_id)
-            jobs[job_id] = {"status": "done", "result": result, "error": None}
-            await job_queues[job_id].put({"phase": "done", "detail": "", "ts": datetime.utcnow().isoformat()})
-        except Exception as exc:  # pragma: no cover
-            logger.exception("Trip planning failed")
-            jobs[job_id] = {"status": "failed", "result": None, "error": str(exc)}
-            await job_queues[job_id].put({"phase": "failed", "detail": str(exc), "ts": datetime.utcnow().isoformat()})
-        finally:
-            await job_queues[job_id].put(None)  # sentinel: tells the SSE stream to close
-
-    asyncio.create_task(_run())
-    return {"job_id": job_id, "status": "running"}
-
-
-@app.post("/trips/from-chat")
-async def create_trip_from_chat(request: ChatRequest):
-    """Extract constraints from chat, then start the same live trip job/stream.
-
-    Origin and destination are never guessed. Missing essential locations are
-    returned as a chat clarification; dates and budget use disclosed defaults.
-    """
-    from langchain_core.messages import HumanMessage, SystemMessage
-
-    today = date.today()
-    recent_history = [
-        {"role": turn.role, "content": turn.content}
-        for turn in request.history[-10:]
-    ]
-    extraction_prompt = _with_custom_prompt(
-        "Extract a trip request into the provided structured fields. Use only details "
-        "stated in the current message or conversation history. Never invent an origin "
-        "city or destination; leave either missing if unclear. Resolve relative dates "
-        f"relative to today ({today.isoformat()}). Preserve the user's requested cities, "
-        "country, duration, traveler count, currency, budget, pace and interests. Leave "
-        "dates, duration and budget empty when absent; the server will apply and disclose "
-        "sensible defaults.\n\n"
-        f"Recent conversation: {json.dumps(recent_history, ensure_ascii=False)}\n\n"
-        f"Current trip request: {request.message}"
-    )
-    try:
-        intake = await agent_llm.with_structured_output(TripChatIntake).ainvoke([
-            SystemMessage(content=_with_custom_prompt("Extract trip details faithfully. Do not add unspecified locations.")),
-            HumanMessage(content=extraction_prompt),
-        ])
-        if not isinstance(intake, TripChatIntake):
-            intake = TripChatIntake.model_validate(intake)
-    except Exception as exc:
-        logger.exception("Could not extract trip details from chat")
-        raise HTTPException(
-            status_code=502,
-            detail="I couldn't read the trip details yet. Please try again or tell me your starting city and destination.",
-        ) from exc
-
-    missing = []
-    if not intake.origin_city or not intake.origin_city.strip():
-        missing.append("starting city")
-    if not intake.destinations:
-        missing.append("destination")
-    if missing:
-        if len(missing) == 2:
-            reply = "What city are you starting from, and where would you like to go?"
-        elif missing[0] == "starting city":
-            reply = "What city will you be starting from?"
-        else:
-            reply = "Where would you like to go?"
-        return {"status": "clarification_required", "reply": reply, "missing": missing}
-
-    assumptions = []
-    start_date = intake.start_date
-    end_date = intake.end_date
-    duration_days = intake.duration_days
-    if start_date is None or end_date is None:
-        if duration_days is None:
-            duration_days = 3
-            assumptions.append("3-day duration default")
-        if start_date is None and end_date is None:
-            start_date = today + timedelta(days=14)
-            end_date = start_date + timedelta(days=duration_days - 1)
-            assumptions.append(f"start date default: {start_date.isoformat()} (14 days from today)")
-        elif start_date is None:
-            start_date = end_date - timedelta(days=duration_days - 1)
-        else:
-            end_date = start_date + timedelta(days=duration_days - 1)
-    if end_date < start_date:
-        return {
-            "status": "clarification_required",
-            "reply": "Those dates appear to be in reverse order. What dates should I use?",
-            "missing": ["valid date range"],
-        }
-    duration_days = (end_date - start_date).days + 1
-
-    travelers = intake.travelers or 1
-    currency = (intake.currency or "USD").upper()
-    budget = intake.total_budget
-    if intake.currency is None and intake.total_budget is not None:
-        assumptions.append("currency default: USD")
-    if budget is None:
-        budget = max(1500.0, 500.0 * duration_days) * travelers
-        assumptions.append(f"budget default: {currency} {budget:,.0f} total for {travelers} traveler(s)")
-    if intake.travelers is None:
-        assumptions.append("1 traveler (default)")
-    pace = intake.pace or "moderate"
-    if intake.pace is None:
-        assumptions.append("moderate pace (default)")
-
-    trip_request = TripRequest(
-        origin_city=intake.origin_city.strip(),
-        destinations=intake.destinations,
-        start_date=start_date,
-        end_date=end_date,
-        total_budget=budget,
-        currency=currency,
-        travelers=travelers,
-        pace=pace,
-        preferences=intake.preferences,
-        notes=intake.notes,
-        # UI path defaults to 2 passes for speed (each pass = research +
-        # draft + validate). Override with TRIP_MAX_ITERATIONS if needed.
-        max_iterations=int(os.getenv("TRIP_MAX_ITERATIONS", "2")),
-    )
-    job = await create_trip(trip_request)
-    return {**job, "assumptions": assumptions}
-
-
-@app.get("/trips/{job_id}/stream")
-async def stream_trip(job_id: str):
-    """Real SSE endpoint: relays the live status events plan_trip() is
-    actually emitting for this job (see the job_queues block above), then
-    sends one final 'result' event with the job's outcome and closes."""
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found.")
-
-    async def event_generator():
-        queue = job_queues.get(job_id)
-        if queue is None:
-            yield _sse_format("error", {"detail": "No live stream for this job."})
-            return
-        while True:
-            item = await queue.get()
-            if item is None:  # sentinel -- the background job is finished
-                break
-            event_name = "done" if item.get("phase") in ("done", "failed") else "status"
-            yield _sse_format(event_name, item)
-        job = jobs.get(job_id, {})
-        yield _sse_format("result", job)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
-    )
-
-
-@app.get("/trips/{job_id}")
-async def get_trip(job_id: str):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    return job
 
 
 @app.post("/trips/sync")
