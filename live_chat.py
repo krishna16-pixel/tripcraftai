@@ -16,7 +16,7 @@ AgentExecutor, no extra API keys required):
 yields dict events the SSE layer relays to the browser:
 
   {"status": "Searching the web: ...", "detail": "...", "tool": "..."} live progress
-  {"sources": [{title,url,domain}]}    logo-card citations (no numbers)
+  {"sources": [{title,url,domain}]}    fetched-source metadata for the Sources drawer
   {"token": "..."}                       answer text
   {"error": "..."}                       failure
 
@@ -79,7 +79,7 @@ def _with_custom_prompt(base: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Sources for logo-card citations (no numbers)
+# Sources shown in the frontend's Sources drawer.
 # --------------------------------------------------------------------------
 _URL_RE = re.compile(r"https?://[^\s\)\]]+")
 
@@ -353,9 +353,10 @@ def build_system_prompt() -> str:
         "weather, transport tips, and a short 'check before you go' list (visa, bookings). "
         "Only state as verified what the tools "
         "returned; label anything else as an estimate. For casual chat, reply briefly.\n\n"
-        "CITATIONS: sources are shown automatically as logo cards below your answer. "
-        "Do NOT write citation numbers like [1] [2] or markdown footnotes -- just write a "
-        "natural answer and mention the source name in words when it matters.\n\n"
+        "SOURCES: fetched websites are available in the UI's Sources side panel. Do not add "
+        "a source list, raw source URLs, citation numbers, or markdown footnotes to the answer "
+        "unless the user explicitly asks for source links. Refer to a source by name only when "
+        "it materially helps.\n\n"
         "FORMAT: make substantial answers easy to scan. Lead with a brief direct answer, "
         "then use descriptive Markdown headings and concise bullets or numbered steps. "
         "Use a Markdown table for side-by-side options, prices, durations, or pros/cons when "
@@ -431,7 +432,7 @@ async def stream_live_chat(
             final_step = step == max_steps - 1
             runner = agent_llm if final_step else llm_tools
             if final_step:
-                messages.append(HumanMessage(content="Now write the final answer using what you found. Do not add citation numbers; sources are shown as logo cards."))
+                messages.append(HumanMessage(content="Now write the final answer using what you found. Do not add a source list, source URLs, citation numbers, or footnotes; fetched sources are available through the UI's Sources side panel."))
             yield {
                 "status": "Thinking" if step == 0 else "Putting it together",
                 "detail": f"step {step + 1}/{max_steps} reasoning with {agent_llm.model_name if hasattr(agent_llm, 'model_name') else 'GLM'}",
