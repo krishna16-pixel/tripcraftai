@@ -157,33 +157,57 @@ def _safe(func, label: str):
     return _wrapped
 
 
+def _ddg_search_10(query: str) -> str:
+    """DuckDuckGo fallback that always returns up to 10 results."""
+    try:
+        try:
+            from ddgs import DDGS
+        except ImportError:  # older package name
+            from duckduckgo_search import DDGS
+
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=10))
+        rows = [
+            f"- {r.get('title', '')}\n  {r.get('href', '')}\n  {(r.get('body') or '')[:400]}"
+            for r in results
+        ]
+        if rows:
+            return "\n".join(rows)
+        return "No results found. Try a different query."
+    except Exception as exc:
+        raise RuntimeError(f"DuckDuckGo failed: {exc}") from exc
+
+
 def build_web_search_tool():
-    """Tavily if TAVILY_API_KEY is set (better quality), else DuckDuckGo
-    (no API key required) so the agent always has a working search tool.
-    Either way, failures are caught so a bad search never crashes the agent."""
+    """Tavily if TAVILY_API_KEY is set (10 results, advanced depth), else
+    DuckDuckGo 10 results (no API key required) so the agent always has a
+    working search tool. Either way, failures are caught so a bad search
+    never crashes the agent."""
     from langchain_core.tools import Tool
 
     description = (
         "Search the live web for real-world travel info: attraction "
         "opening hours, ticket prices, average costs, transport "
         "schedules, visa/entry rules, weather, safety notes. "
-        "Input: a search query string."
+        "Returns up to 10 websites per query. Input: a search query string."
     )
 
     if os.getenv("TAVILY_API_KEY"):
         try:
             from langchain_community.tools.tavily_search import TavilySearchResults
 
-            tavily = TavilySearchResults(max_results=5)
+            tavily = TavilySearchResults(
+                max_results=10,
+                search_depth="advanced",
+                include_answer=False,
+                include_raw_content=False,
+            )
             return Tool(name="web_search", description=description, func=_safe(tavily.run, "web_search"))
         except Exception as exc:  # pragma: no cover
             logger.warning("Tavily unavailable (%s); falling back to DuckDuckGo", exc)
 
     try:
-        from langchain_community.tools import DuckDuckGoSearchRun
-
-        ddg = DuckDuckGoSearchRun()
-        return Tool(name="web_search", description=description, func=_safe(ddg.run, "web_search"))
+        return Tool(name="web_search", description=description, func=_safe(_ddg_search_10, "web_search"))
     except Exception as exc:  # pragma: no cover
         logger.error("No web search backend available: %s", exc)
         return Tool(
@@ -300,12 +324,31 @@ def _import_mcp_adapter():
 
 async def load_mcp_tools() -> list:
     """Connect to every configured MCP server and return their tools as
-    LangChain-compatible Tool objects. Fails soft: if the adapter package
-    isn't installed, isn't resolvable, or no servers are configured, this
-    returns [] rather than crashing the app."""
+    LangChain-compatible Tool objects. Uses MCP_CONNECT_TIMEOUT_SECONDS
+    so a hung `uvx` download never blocks planning forever. Fails soft:
+    returns [] rather than crashing the app, but logs the real reason."""
+    import asyncio
+    import shutil
+
     config = _load_mcp_server_config()
     if not config:
-        logger.info("No MCP servers configured (MCP_SERVERS_JSON/MCP_SERVERS_FILE unset).")
+        logger.info("No MCP servers configured (MCP_USE_DEFAULT_SERVERS=false).")
+        return []
+
+    timeout_s = int(os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "30"))
+    uvx_path = shutil.which("uvx") or shutil.which("uv")
+    needs_uvx = any(
+        (v.get("command") in ("uvx", "uv")) for v in config.values() if isinstance(v, dict)
+    )
+    if needs_uvx and uvx_path is None:
+        # Fail fast: no `uvx` on PATH means every stdio server would crash
+        # on spawn. Skip the connect attempt entirely so planning starts
+        # immediately with web_search + route estimator.
+        logger.error(
+            "MCP servers need `uvx` on PATH but it was not found. Install uv "
+            "(https://docs.astral.sh/uv/getting-started/installation/) or set "
+            "MCP_USE_DEFAULT_SERVERS=false. Continuing with web_search only."
+        )
         return []
 
     try:
@@ -319,12 +362,83 @@ async def load_mcp_tools() -> list:
 
     try:
         client = MultiServerMCPClient(config)
-        tools = await client.get_tools()
+        tools = await asyncio.wait_for(client.get_tools(), timeout=timeout_s)
         logger.info("Loaded %d tool(s) from %d MCP server(s).", len(tools), len(config))
         return tools
+    except asyncio.TimeoutError:
+        logger.error(
+            "MCP connect timed out after %ds (uvx first-run downloads can be slow). "
+            "Check /health/mcp. Continuing with web_search only.",
+            timeout_s,
+        )
+        return []
     except Exception as exc:
         logger.error("Failed to load MCP tools: %s", exc)
         return []
+
+
+async def get_mcp_status() -> dict:
+    """Diagnostics for GET /health/mcp -- proves MCP actually works."""
+    import asyncio
+    import shutil
+
+    config = _load_mcp_server_config()
+    timeout_s = int(os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "30"))
+    uvx_found = bool(shutil.which("uvx") or shutil.which("uv"))
+    if not config:
+        return {
+            "status": "disabled",
+            "servers": {},
+            "tool_count": 0,
+            "uvx_found": uvx_found,
+            "timeout_seconds": timeout_s,
+            "hint": "Set MCP_USE_DEFAULT_SERVERS=true (default) to enable time/fetch/public_apis.",
+        }
+    try:
+        MultiServerMCPClient = _import_mcp_adapter()
+    except ImportError as exc:
+        return {
+            "status": "missing_package",
+            "servers": list(config.keys()),
+            "tool_count": 0,
+            "uvx_found": uvx_found,
+            "timeout_seconds": timeout_s,
+            "error": str(exc),
+            "hint": "pip install langchain-mcp-adapters mcp",
+        }
+    try:
+        client = MultiServerMCPClient(config)
+        tools = await asyncio.wait_for(client.get_tools(), timeout=timeout_s)
+        by_server: dict = {}
+        for t in tools:
+            # langchain-mcp-adapters names tools plainly; group best-effort
+            by_server.setdefault("all", []).append(getattr(t, "name", str(t)))
+        return {
+            "status": "ok",
+            "servers": list(config.keys()),
+            "tool_count": len(tools),
+            "tools": by_server.get("all", [])[:50],
+            "uvx_found": uvx_found,
+            "timeout_seconds": timeout_s,
+        }
+    except asyncio.TimeoutError:
+        return {
+            "status": "timeout",
+            "servers": list(config.keys()),
+            "tool_count": 0,
+            "uvx_found": uvx_found,
+            "timeout_seconds": timeout_s,
+            "error": f"connect timed out after {timeout_s}s (uvx download slow?)",
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "servers": list(config.keys()),
+            "tool_count": 0,
+            "uvx_found": uvx_found,
+            "timeout_seconds": timeout_s,
+            "error": str(exc),
+        }
 
 
 _cached_tools: Optional[list] = None
@@ -376,11 +490,12 @@ def geocode_city(city_name: str) -> Optional[tuple]:
     callers must treat that as 'distance unknown', not as an error."""
     if city_name in _GEOCODE_CACHE:
         return _GEOCODE_CACHE[city_name]
+    timeout_s = int(os.getenv("GEOCODE_TIMEOUT_SECONDS", "5"))
     try:
         from geopy.geocoders import Nominatim
 
-        geolocator = Nominatim(user_agent="trip_planner_agent")
-        location = geolocator.geocode(city_name, timeout=10)
+        geolocator = Nominatim(user_agent="trip_planner_agent", timeout=timeout_s)
+        location = geolocator.geocode(city_name, timeout=timeout_s)
         if location:
             coords = (location.latitude, location.longitude)
             _GEOCODE_CACHE[city_name] = coords
