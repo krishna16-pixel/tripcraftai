@@ -45,7 +45,7 @@ Env vars:
     MCP_SERVERS_FILE      optional. Path to a JSON file with the same config.
     MCP_USE_DEFAULT_SERVERS  default: true. Set "false" to run with no MCP
                            servers instead of the free defaults.
-    MCP_CONNECT_TIMEOUT_SECONDS default: 30 (max wait for MCP servers to connect).
+    MCP_CONNECT_TIMEOUT_SECONDS default: 120 (max wait for MCP servers to connect).
     GLM_CHAT_MAX_TOKENS   default: 16384 (full output budget for chat + citations)
     UPLOAD_DIR             default: ./uploads
 
@@ -626,7 +626,7 @@ async def health():
         "live_tools": [t.name for t in live_chat.TOOLS],
         "custom_prompt_file": custom_path,
         "custom_prompt_loaded": custom_loaded,
-        "mcp_connect_timeout_seconds": int(os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "30")),
+        "mcp_connect_timeout_seconds": int(os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "120")),
     }
 
 

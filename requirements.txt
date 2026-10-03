@@ -21,5 +21,6 @@ pypdf
 langchain
 langchain-classic
 langchain-community
+langchain-tavily
 langchain-mcp-adapters
 mcp

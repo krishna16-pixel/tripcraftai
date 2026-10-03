@@ -194,9 +194,9 @@ def build_web_search_tool():
 
     if os.getenv("TAVILY_API_KEY"):
         try:
-            from langchain_community.tools.tavily_search import TavilySearchResults
+            from langchain_tavily import TavilySearch
 
-            tavily = TavilySearchResults(
+            tavily = TavilySearch(
                 max_results=10,
                 search_depth="advanced",
                 include_answer=False,
@@ -335,7 +335,8 @@ async def load_mcp_tools() -> list:
         logger.info("No MCP servers configured (MCP_USE_DEFAULT_SERVERS=false).")
         return []
 
-    timeout_s = int(os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "30"))
+    # First-run uvx downloads can take longer on small Render instances.
+    timeout_s = int(os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "120"))
     uvx_path = shutil.which("uvx") or shutil.which("uv")
     needs_uvx = any(
         (v.get("command") in ("uvx", "uv")) for v in config.values() if isinstance(v, dict)
@@ -366,9 +367,9 @@ async def load_mcp_tools() -> list:
         logger.info("Loaded %d tool(s) from %d MCP server(s).", len(tools), len(config))
         return tools
     except asyncio.TimeoutError:
-        logger.error(
+        logger.warning(
             "MCP connect timed out after %ds (uvx first-run downloads can be slow). "
-            "Check /health/mcp. Continuing with web_search only.",
+            "Check /health/mcp. Continuing with web_search only; MCP is optional.",
             timeout_s,
         )
         return []
@@ -383,7 +384,7 @@ async def get_mcp_status() -> dict:
     import shutil
 
     config = _load_mcp_server_config()
-    timeout_s = int(os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "30"))
+    timeout_s = int(os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "120"))
     uvx_found = bool(shutil.which("uvx") or shutil.which("uv"))
     if not config:
         return {
