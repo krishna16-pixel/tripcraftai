@@ -8,7 +8,8 @@ httpx
 
 # LLM (NVIDIA OpenAI-compatible endpoint) + tool calling
 langchain-core
-langchain-openai
+langchain-openai>=1.1.12
+uv
 
 # Live research tools used by /chat (no `uvx` needed)
 ddgs
