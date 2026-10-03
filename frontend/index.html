@@ -418,6 +418,7 @@
         let isChatActive = false;
         const chatHistory = [];
         let conversationId = 0;
+        let tripIntakePending = false; // backend asked for origin/destination; next message is the answer
 
         // Sidebar Elements
         const sidebar = document.getElementById('sidebar');
@@ -447,6 +448,7 @@
             isChatActive = false;
             conversationId++;
             chatHistory.length = 0;
+            tripIntakePending = false;
             messageInput.disabled = false;
             sendBtn.disabled = false;
 
@@ -773,7 +775,7 @@
                 const response = await fetch(`${BACKEND_URL}/chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: prompt, history })
+                    body: JSON.stringify({ message: prompt, history, trip_pending: tripIntakePending })
                 });
                 if (requestConversationId !== conversationId) return;
                 aiNodes.setThinking('Thinking', 'waiting for backend response');
@@ -799,6 +801,10 @@
                         if (rawData === '[DONE]') return;
                         const data = JSON.parse(rawData);
                         if (data.error) throw new Error(data.error);
+                        if (typeof data.trip_pending === 'boolean') {
+                            tripIntakePending = data.trip_pending;
+                            return;
+                        }
                         if (Array.isArray(data.sources)) {
                             if (requestConversationId !== conversationId) return;
                             aiNodes.renderSources(data.sources);

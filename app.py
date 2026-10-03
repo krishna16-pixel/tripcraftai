@@ -30,6 +30,7 @@ Env vars:
     GLM_PLANNING_MAX_TOKENS default: 16384 (structured itinerary drafts)
     RESEARCH_MAX_ITERATIONS default: 5 (research-agent tool steps per pass)
     RESEARCH_TIMEOUT_SECONDS default: 150 (fail fast instead of hanging)
+    TRIP_MAX_ITERATIONS   default: 2 (passes for trip planning started from chat)
     GEOCODE_TIMEOUT_SECONDS default: 5 (Nominatim lookup cap per city)
     GLM_VISION_MODEL      default: z-ai/glm-5.3-flash  (multimodal -- used for image uploads)
     TAVILY_API_KEY        optional. Better web search than the DuckDuckGo fallback.
@@ -60,10 +61,11 @@ import importlib.util
 import json
 import logging
 import mimetypes
+import re
 import os
 import sys
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
@@ -579,6 +581,7 @@ class ChatTurn(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=5000)
     history: List[ChatTurn] = Field(default_factory=list)
+    trip_pending: bool = False  # True while the planner is waiting for origin/destination
 
 
 @app.get("/health")
@@ -620,6 +623,229 @@ async def frontend():
     return FileResponse(index_file, media_type="text/html")
 
 
+class TripChatIntake(BaseModel):
+    """Trip details extracted from a natural-language chat request."""
+    origin_city: Optional[str] = None
+    destinations: List[CityStop] = Field(default_factory=list)
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    duration_days: Optional[int] = Field(default=None, ge=1, le=30)
+    total_budget: Optional[float] = Field(default=None, gt=0)
+    currency: Optional[str] = None
+    travelers: Optional[int] = Field(default=None, ge=1, le=20)
+    pace: Optional[str] = None
+    preferences: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+_TRIP_CANCEL_RE = re.compile(
+    r"\b(?:cancel|stop|never mind|nevermind|forget it|skip it|don't(?: want to)? plan|"
+    r"do not(?: want to)? plan|rather not plan)\b",
+    re.I,
+)
+
+
+def _is_trip_cancellation(message: str) -> bool:
+    return bool(_TRIP_CANCEL_RE.search(message or ""))
+
+
+def _is_trip_planning_request(message: str) -> bool:
+    """Detects an explicit request to plan a trip (same rules the UI used before)."""
+    text = " ".join((message or "").split()).lower()
+    if _is_trip_cancellation(text):
+        return False
+    action_before_trip = re.search(r"\b(?:plan|planning|create|build|make|organize|draft|design)\b.{0,60}\b(?:trip|travel|itinerary|vacation|holiday)\b", text)
+    trip_before_action = re.search(r"\b(?:trip|travel|itinerary|vacation|holiday)\b.{0,60}\b(?:plan|planning|create|build|make|organize|draft)\b", text)
+    itinerary_request = re.search(r"\b(?:\d+\s*[- ]day\s+)?itinerary\s+(?:for|to|in|around)\b", text)
+    duration_plan = re.search(r"\b(?:plan|create|build|make|organize|draft)\b.{0,50}\b(?:\d+\s*(?:day|night)s?|weekend)\b.{0,50}\b(?:in|to|around)\b", text)
+    return bool(action_before_trip or trip_before_action or itinerary_request or duration_plan)
+
+
+def _data(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _trip_request_from_chat(message: str, history: list) -> dict:
+    """Extract constraints from chat. Origin and destination are never guessed;
+    dates and budget use disclosed defaults."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    today = date.today()
+    extraction_prompt = _with_custom_prompt(
+        "Extract a trip request into the provided structured fields. Use only details "
+        "stated in the current message or conversation history. Never invent an origin "
+        "city or destination; leave either missing if unclear. Resolve relative dates "
+        f"relative to today ({today.isoformat()}). Preserve the user's requested cities, "
+        "country, duration, traveler count, currency, budget, pace and interests. Leave "
+        "dates, duration and budget empty when absent; the server will apply and disclose "
+        "sensible defaults.\n\n"
+        f"Recent conversation: {json.dumps(history, ensure_ascii=False)}\n\n"
+        f"Current trip request: {message}"
+    )
+    try:
+        intake = await agent_llm.with_structured_output(TripChatIntake).ainvoke([
+            SystemMessage(content=_with_custom_prompt("Extract trip details faithfully. Do not add unspecified locations.")),
+            HumanMessage(content=extraction_prompt),
+        ])
+        if not isinstance(intake, TripChatIntake):
+            intake = TripChatIntake.model_validate(intake)
+    except Exception as exc:
+        logger.exception("Could not extract trip details from chat")
+        raise RuntimeError(
+            "I couldn't read the trip details yet. Please try again or tell me your starting city and destination."
+        ) from exc
+
+    missing = []
+    if not intake.origin_city or not intake.origin_city.strip():
+        missing.append("starting city")
+    if not intake.destinations:
+        missing.append("destination")
+    if missing:
+        if len(missing) == 2:
+            reply = "What city are you starting from, and where would you like to go?"
+        elif missing[0] == "starting city":
+            reply = "What city will you be starting from?"
+        else:
+            reply = "Where would you like to go?"
+        return {"status": "clarification_required", "reply": reply}
+
+    assumptions = []
+    start_date = intake.start_date
+    end_date = intake.end_date
+    duration_days = intake.duration_days
+    if start_date is None or end_date is None:
+        if duration_days is None:
+            duration_days = 3
+            assumptions.append("3-day duration default")
+        if start_date is None and end_date is None:
+            start_date = today + timedelta(days=14)
+            end_date = start_date + timedelta(days=duration_days - 1)
+            assumptions.append(f"start date default: {start_date.isoformat()} (14 days from today)")
+        elif start_date is None:
+            start_date = end_date - timedelta(days=duration_days - 1)
+        else:
+            end_date = start_date + timedelta(days=duration_days - 1)
+    if end_date < start_date:
+        return {"status": "clarification_required", "reply": "Those dates appear to be in reverse order. What dates should I use?"}
+    duration_days = (end_date - start_date).days + 1
+
+    travelers = intake.travelers or 1
+    currency = (intake.currency or "USD").upper()
+    budget = intake.total_budget
+    if intake.currency is None and intake.total_budget is not None:
+        assumptions.append("currency default: USD")
+    if budget is None:
+        budget = max(1500.0, 500.0 * duration_days) * travelers
+        assumptions.append(f"budget default: {currency} {budget:,.0f} total for {travelers} traveler(s)")
+    if intake.travelers is None:
+        assumptions.append("1 traveler (default)")
+    pace = intake.pace or "moderate"
+    if intake.pace is None:
+        assumptions.append("moderate pace (default)")
+
+    constraints = TripConstraints(
+        origin_city=intake.origin_city.strip(),
+        destinations=intake.destinations,
+        start_date=start_date,
+        end_date=end_date,
+        total_budget=budget,
+        currency=currency,
+        travelers=travelers,
+        pace=pace,
+        preferences=intake.preferences,
+        notes=intake.notes,
+    )
+    return {"status": "ready", "constraints": constraints, "assumptions": assumptions}
+
+
+def _hhmm(value) -> str:
+    return str(value or "")[:5]
+
+
+def _format_trip_reply(plan: dict, assumptions: list) -> str:
+    """Plain-text itinerary for the chat bubble (mirrors the old UI formatter)."""
+    itinerary = plan.get("itinerary")
+    if not itinerary:
+        return "The trip planner finished, but did not return an itinerary."
+    cur = itinerary.get("currency") or "USD"
+
+    lines = [itinerary.get("trip_title") or "Your trip itinerary"]
+    if assumptions:
+        lines.append(f"Assumptions: {'; '.join(assumptions)}.")
+    if itinerary.get("summary"):
+        lines.append(itinerary["summary"])
+
+    for index, day in enumerate(itinerary.get("days") or []):
+        lines.append(f"\n{day.get('date') or f'Day {index + 1}'} — {day.get('city') or 'Destination'}")
+        transfer = day.get("transfer")
+        if transfer:
+            lines.append(
+                f"  Transfer: {transfer.get('from_city')} → {transfer.get('to_city')} by {transfer.get('mode')}, "
+                f"{_hhmm(transfer.get('depart_time'))}–{_hhmm(transfer.get('arrive_time'))}."
+            )
+        for activity in day.get("activities") or []:
+            time_range = f"{_hhmm(activity.get('start_time'))}–{_hhmm(activity.get('end_time'))}"
+            cost = float(activity.get("estimated_cost") or 0)
+            cost_txt = f" (est. {cur} {cost:.0f})" if cost > 0 else ""
+            notes_txt = f" — {activity['notes']}" if activity.get("notes") else ""
+            lines.append(f"  {time_range}: {activity.get('name')}{cost_txt}{notes_txt}")
+        lodging = float(day.get("lodging_cost") or 0)
+        if lodging > 0:
+            lines.append(f"  Lodging estimate: {cur} {lodging:.0f}")
+
+    total = float(itinerary.get("total_estimated_cost") or 0)
+    lines.append(f"\nEstimated total: {cur} {total:.0f}.")
+    issues = (plan.get("validation") or {}).get("issues") or []
+    if issues:
+        lines.append("Validation notes: " + " ".join(i.get("message", "") for i in issues[:4]))
+    if plan.get("status") == "unresolved_after_max_iterations":
+        lines.append("Some validation items may still need review.")
+    return "\n".join(lines)
+
+
+async def _stream_trip_chat(message: str, history: list):
+    """SSE stream for a trip request made in chat: asks for missing places, or runs
+    the real planner and streams its live phases, then the finished itinerary."""
+    try:
+        req = await _trip_request_from_chat(message, history)
+    except Exception as exc:
+        yield _data({"error": str(exc)})
+        yield "data: [DONE]\n\n"
+        return
+
+    if req["status"] == "clarification_required":
+        yield _data({"trip_pending": True})
+        yield _data({"token": req["reply"]})
+        yield "data: [DONE]\n\n"
+        return
+
+    job_id = str(uuid.uuid4())
+    queue: asyncio.Queue = asyncio.Queue()
+    job_queues[job_id] = queue
+    max_iterations = int(os.getenv("TRIP_MAX_ITERATIONS", "2"))
+    task = asyncio.create_task(
+        plan_trip(req["constraints"], max_iterations=max_iterations, job_id=job_id)
+    )
+    try:
+        yield _data({"trip_pending": False})
+        while not task.done() or not queue.empty():
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            yield _data({"status": item.get("phase", "working"), "detail": item.get("detail", "")})
+        plan = task.result()
+        yield _data({"token": _format_trip_reply(plan, req["assumptions"])})
+    except Exception as exc:
+        logger.exception("Trip planning from chat failed")
+        yield _data({"error": f"Trip planning failed: {exc}"})
+    finally:
+        job_queues.pop(job_id, None)
+        if not task.done():
+            task.cancel()
+    yield "data: [DONE]\n\n"
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest):
     """Answer a free-form travel question with the configured chat model."""
@@ -635,11 +861,23 @@ async def chat(request: ChatRequest):
     def _sse(payload: dict) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+    # Trip planning requests (or a follow-up to an open trip question) run the
+    # structured planner inside the chat stream. Cancelling falls through to chat.
+    wants_trip = not _is_trip_cancellation(request.message) and (
+        request.trip_pending or _is_trip_planning_request(request.message)
+    )
+    if wants_trip:
+        return StreamingResponse(
+            _stream_trip_chat(request.message, history), media_type="text/event-stream", headers=headers
+        )
+
     # Travel / current-info questions -> live research (web search, weather,
     # exchange rates, real clock). Plain small talk -> the fast chat model.
     if live_chat.needs_live_research(request.message):
 
         async def stream_live():
+            if request.trip_pending:
+                yield _sse({"trip_pending": False})
             try:
                 async for event in live_chat.stream_live_chat(agent_llm, request.message, history):
                     yield _sse(event)
@@ -666,6 +904,8 @@ async def chat(request: ChatRequest):
     messages.append(HumanMessage(content=request.message))
 
     async def stream_reply():
+        if request.trip_pending:
+            yield _sse({"trip_pending": False})
         try:
             async for chunk in chat_llm.astream(messages):
                 token = chunk.content
