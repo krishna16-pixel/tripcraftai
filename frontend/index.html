@@ -245,6 +245,62 @@
             display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
         }
         .source-card .src-domain { font-size: 11px; color: #777; }
+        .assistant-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px;
+            margin-top: 10px;
+        }
+        .assistant-action-btn {
+            min-height: 32px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            border: 1px solid transparent;
+            border-radius: 9px;
+            background: transparent;
+            color: #858585;
+            padding: 0 8px;
+            font: inherit;
+            font-size: 12px;
+            transition: color .18s ease, background .18s ease, border-color .18s ease;
+        }
+        .assistant-action-btn:not(:disabled) { cursor: pointer; }
+        .assistant-action-btn:not(:disabled):hover {
+            color: #f3f4f6;
+            background: #171717;
+            border-color: #292929;
+        }
+        .assistant-action-btn:disabled { opacity: .42; cursor: not-allowed; }
+        .assistant-action-btn[aria-pressed="true"] {
+            color: #d1d5db;
+            background: #202020;
+            border-color: #383838;
+        }
+        .assistant-action-btn svg { width: 16px; height: 16px; }
+        .assistant-action-btn .source-count { color: #b8b8b8; font-variant-numeric: tabular-nums; }
+        #sourceBackdrop {
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity .25s ease;
+        }
+        #sourceBackdrop.is-open { opacity: 1; pointer-events: auto; }
+        #sourceSidebar {
+            transform: translateX(100%);
+            transition: transform .32s cubic-bezier(.16, 1, .3, 1);
+        }
+        #sourceSidebar.is-open { transform: translateX(0); }
+        #actionToast {
+            opacity: 0;
+            transform: translate(-50%, 8px);
+            transition: opacity .2s ease, transform .2s ease;
+        }
+        #actionToast.is-visible { opacity: 1; transform: translate(-50%, 0); }
+        @media (prefers-reduced-motion: reduce) {
+            #sourceBackdrop, #sourceSidebar, #actionToast { transition-duration: .01ms; }
+        }
     </style>
 </head>
 <body class="h-screen w-screen overflow-hidden flex bg-[#030303] text-white">
@@ -385,6 +441,25 @@
     </div> <!-- Close center flex section -->
     </div> <!-- Close mainContent wrapper -->
 
+    <div id="sourceBackdrop" class="fixed inset-0 z-[60] bg-black/60" aria-hidden="true"></div>
+    <aside id="sourceSidebar" class="fixed right-0 top-0 z-[70] flex h-full w-[380px] max-w-full flex-col border-l border-white/10 bg-[#0b0b0b] shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="sourcePanelTitle" aria-hidden="true" inert>
+        <header class="flex items-start justify-between gap-4 border-b border-white/10 px-5 py-5">
+            <div class="min-w-0">
+                <p class="text-[10px] font-semibold uppercase tracking-[.18em] text-gray-500">Web research</p>
+                <h2 id="sourcePanelTitle" class="mt-1 text-lg font-semibold text-white">Sources</h2>
+                <p id="sourcePanelSubtitle" class="mt-1 text-xs text-gray-500">Used for this response</p>
+            </div>
+            <button id="sourceCloseBtn" type="button" class="rounded-lg p-2 text-gray-400 transition-colors hover:bg-white/10 hover:text-white" aria-label="Close sources">
+                <i data-lucide="x" class="h-4 w-4"></i>
+            </button>
+        </header>
+        <div id="sourcePanelList" class="flex-1 space-y-3 overflow-y-auto p-4" aria-live="polite">
+            <p class="px-1 py-2 text-sm text-gray-500">No sources are available for this response.</p>
+        </div>
+        <div class="border-t border-white/10 px-5 py-3 text-[11px] text-gray-500">Source links open in a new tab.</div>
+    </aside>
+    <div id="actionToast" class="pointer-events-none fixed bottom-24 left-1/2 z-[90] rounded-full border border-white/10 bg-[#202020] px-4 py-2 text-xs text-gray-100 shadow-xl" role="status" aria-live="polite"></div>
+
     <script>
         // Use the API service directly, even when the frontend is hosted elsewhere.
         const BACKEND_URL = ['localhost', '127.0.0.1'].includes(window.location.hostname)
@@ -507,6 +582,164 @@
         let followLatest = true;
         let chatScrollFrame = 0;
         let touchStartY = null;
+        const sourceSidebar = document.getElementById('sourceSidebar');
+        const sourceBackdrop = document.getElementById('sourceBackdrop');
+        const sourceCloseBtn = document.getElementById('sourceCloseBtn');
+        const sourcePanelSubtitle = document.getElementById('sourcePanelSubtitle');
+        const sourcePanelList = document.getElementById('sourcePanelList');
+        const actionToast = document.getElementById('actionToast');
+        let activeSourceNodes = null;
+        let lastAssistantNodes = null;
+        let activeSpeechButton = null;
+        let actionToastTimer = null;
+
+        function showActionToast(message) {
+            actionToast.textContent = message;
+            actionToast.classList.add('is-visible');
+            clearTimeout(actionToastTimer);
+            actionToastTimer = setTimeout(() => actionToast.classList.remove('is-visible'), 1800);
+        }
+
+        function renderSourcesPanel(nodes) {
+            const sources = nodes?.sources || [];
+            sourcePanelSubtitle.textContent = `${sources.length} source${sources.length === 1 ? '' : 's'} used for this response`;
+            sourcePanelList.replaceChildren();
+            if (!sources.length) {
+                const empty = document.createElement('p');
+                empty.className = 'px-1 py-2 text-sm text-gray-500';
+                empty.textContent = 'No sources are available for this response.';
+                sourcePanelList.appendChild(empty);
+                return;
+            }
+
+            sources.forEach(source => {
+                const card = document.createElement('a');
+                card.className = 'group block rounded-xl border border-white/10 bg-white/[0.03] p-4 transition-colors hover:border-white/20 hover:bg-white/[0.06]';
+                card.href = source.url;
+                card.target = '_blank';
+                card.rel = 'noopener noreferrer';
+
+                const heading = document.createElement('div');
+                heading.className = 'flex items-start justify-between gap-3';
+                const title = document.createElement('span');
+                title.className = 'text-sm font-medium leading-5 text-gray-100 group-hover:text-white';
+                title.textContent = source.title || source.domain || source.url;
+                const external = document.createElement('span');
+                external.className = 'shrink-0 text-xs text-gray-500';
+                external.setAttribute('aria-hidden', 'true');
+                external.textContent = '↗';
+                heading.append(title, external);
+
+                const domain = document.createElement('div');
+                domain.className = 'mt-2 break-all text-xs text-gray-500';
+                domain.textContent = source.domain || safeDomain(source.url);
+                card.append(heading, domain);
+                sourcePanelList.appendChild(card);
+            });
+        }
+
+        function openSourcesPanel(nodes) {
+            if (!nodes?.sources?.length) return;
+            activeSourceNodes = nodes;
+            renderSourcesPanel(nodes);
+            sourceSidebar.inert = false;
+            sourceSidebar.setAttribute('aria-hidden', 'false');
+            sourceBackdrop.setAttribute('aria-hidden', 'false');
+            sourceSidebar.classList.add('is-open');
+            sourceBackdrop.classList.add('is-open');
+            requestAnimationFrame(() => sourceCloseBtn.focus({ preventScroll: true }));
+        }
+
+        function closeSourcesPanel(returnFocus = true) {
+            const trigger = activeSourceNodes?.sourceButton;
+            sourceSidebar.classList.remove('is-open');
+            sourceBackdrop.classList.remove('is-open');
+            sourceSidebar.inert = true;
+            sourceSidebar.setAttribute('aria-hidden', 'true');
+            sourceBackdrop.setAttribute('aria-hidden', 'true');
+            activeSourceNodes = null;
+            if (returnFocus && trigger?.isConnected && !trigger.disabled) trigger.focus({ preventScroll: true });
+        }
+
+        sourceCloseBtn.addEventListener('click', () => closeSourcesPanel());
+        sourceBackdrop.addEventListener('click', () => closeSourcesPanel());
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && sourceSidebar.classList.contains('is-open')) closeSourcesPanel();
+        });
+        sourceSidebar.addEventListener('keydown', event => {
+            if (event.key !== 'Tab') return;
+            const focusable = [...sourceSidebar.querySelectorAll('button:not(:disabled), a[href]')];
+            if (!focusable.length) return;
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        });
+
+        function setSpeakButton(button, isSpeaking) {
+            if (!button?.isConnected) return;
+            button.innerHTML = `<i data-lucide="${isSpeaking ? 'volume-x' : 'volume-2'}" class="h-4 w-4"></i>`;
+            button.title = isSpeaking ? 'Stop reading aloud' : 'Read response aloud';
+            button.setAttribute('aria-label', button.title);
+            button.setAttribute('aria-pressed', String(isSpeaking));
+            lucide.createIcons();
+        }
+
+        function stopSpeaking() {
+            const button = activeSpeechButton;
+            activeSpeechButton = null;
+            if (window.speechSynthesis) window.speechSynthesis.cancel();
+            if (button) setSpeakButton(button, false);
+        }
+
+        function speakResponse(nodes) {
+            const text = nodes.contentNode.innerText.trim();
+            if (!text) return;
+            if (!window.speechSynthesis || typeof SpeechSynthesisUtterance === 'undefined') {
+                showActionToast('Speech playback is not supported in this browser.');
+                return;
+            }
+            if (activeSpeechButton === nodes.speakButton) {
+                stopSpeaking();
+                return;
+            }
+            stopSpeaking();
+            const utterance = new SpeechSynthesisUtterance(text);
+            activeSpeechButton = nodes.speakButton;
+            setSpeakButton(nodes.speakButton, true);
+            const finish = () => {
+                if (activeSpeechButton !== nodes.speakButton) return;
+                activeSpeechButton = null;
+                setSpeakButton(nodes.speakButton, false);
+            };
+            utterance.onend = finish;
+            utterance.onerror = finish;
+            window.speechSynthesis.speak(utterance);
+        }
+
+        async function copyResponse(nodes) {
+            const text = nodes.contentNode.innerText.trim();
+            if (!text) return;
+            try {
+                await navigator.clipboard.writeText(text);
+                showActionToast('Response copied.');
+            } catch {
+                showActionToast('Clipboard access is unavailable in this browser.');
+            }
+        }
+
+        function setResponseFeedback(nodes, vote) {
+            nodes.feedback = nodes.feedback === vote ? '' : vote;
+            nodes.likeButton.setAttribute('aria-pressed', String(nodes.feedback === 'up'));
+            nodes.dislikeButton.setAttribute('aria-pressed', String(nodes.feedback === 'down'));
+            nodes.likeButton.title = nodes.feedback === 'up' ? 'Remove helpful rating' : 'Mark as helpful';
+            nodes.dislikeButton.title = nodes.feedback === 'down' ? 'Remove unhelpful rating' : 'Mark as not helpful';
+        }
 
         function isNearChatBottom() {
             return chatArea.scrollHeight - chatArea.clientHeight - chatArea.scrollTop < 72;
@@ -598,6 +831,9 @@
         function resetChat() {
             if (!isChatActive) return; // Do nothing if already on a fresh screen
             
+            stopSpeaking();
+            closeSourcesPanel(false);
+            lastAssistantNodes = null;
             isChatActive = false;
             conversationId++;
             chatHistory.length = 0;
@@ -738,6 +974,13 @@
             appendUserMessage(text);
             const requestHistory = chatHistory.slice(-20);
             const requestConversationId = conversationId;
+            const requestTripPending = tripIntakePending;
+            const requestContext = {
+                prompt: text,
+                history: requestHistory,
+                conversationId: requestConversationId,
+                tripPending: requestTripPending
+            };
             chatHistory.push({ role: 'user', content: text });
             
             // Reset input state immediately
@@ -760,8 +1003,8 @@
             }
             
             // Setup empty AI Response Node & Trigger Streaming Handler
-            const aiNodes = appendAIMessage();
-            handleAIResponse(text, aiNodes, requestHistory, requestConversationId);
+            const aiNodes = appendAIMessage(requestContext);
+            handleAIResponse(text, aiNodes, requestHistory, requestConversationId, requestTripPending);
         }
 
         // Send Button Click
@@ -783,7 +1026,8 @@
         }
 
         // Append AI Message Skeleton
-        function appendAIMessage() {
+        function appendAIMessage(requestContext = null) {
+            if (lastAssistantNodes) lastAssistantNodes.retryButton.disabled = true;
             const msgDiv = document.createElement('div');
             msgDiv.className = `chat-message-row flex w-full animate-fade-in-up justify-start`;
             
@@ -803,17 +1047,50 @@
                     <div class="ai-content leading-relaxed"></div>
                     <!-- Logo-card citations (no numbers) -->
                     <div class="sources-row" style="display:none;"></div>
+                    <div class="assistant-toolbar" role="toolbar" aria-label="Assistant response actions">
+                        <button type="button" class="assistant-action-btn" data-action="copy" aria-label="Copy response" title="Copy response" disabled>
+                            <i data-lucide="copy" class="h-4 w-4"></i>
+                        </button>
+                        <button type="button" class="assistant-action-btn" data-action="speak" aria-label="Read response aloud" title="Read response aloud" aria-pressed="false" disabled>
+                            <i data-lucide="volume-2" class="h-4 w-4"></i>
+                        </button>
+                        <button type="button" class="assistant-action-btn" data-action="helpful" aria-label="Mark as helpful" title="Mark as helpful" aria-pressed="false" disabled>
+                            <i data-lucide="thumbs-up" class="h-4 w-4"></i>
+                        </button>
+                        <button type="button" class="assistant-action-btn" data-action="unhelpful" aria-label="Mark as not helpful" title="Mark as not helpful" aria-pressed="false" disabled>
+                            <i data-lucide="thumbs-down" class="h-4 w-4"></i>
+                        </button>
+                        <button type="button" class="assistant-action-btn" data-action="retry" aria-label="Retry response" title="Retry response" disabled>
+                            <i data-lucide="rotate-cw" class="h-4 w-4"></i>
+                        </button>
+                        <button type="button" class="assistant-action-btn" data-action="sources" aria-label="View sources for this response" title="No sources were fetched for this response" disabled>
+                            <i data-lucide="book-open" class="h-4 w-4"></i>
+                            <span>Sources</span><span class="source-count"></span>
+                        </button>
+                    </div>
                 </div>
             `;
             
             msgDiv.appendChild(innerDiv);
             chatArea.appendChild(msgDiv);
+            lucide.createIcons();
             scrollChatToLatest();
 
             const statusNode = msgDiv.querySelector('.ai-status');
             const statusTextNode = msgDiv.querySelector('.status-text');
             const elapsedNode = msgDiv.querySelector('.thinking-elapsed');
             const logNode = msgDiv.querySelector('.thinking-log');
+            const contentNode = msgDiv.querySelector('.ai-content');
+            const copyButton = msgDiv.querySelector('[data-action="copy"]');
+            const speakButton = msgDiv.querySelector('[data-action="speak"]');
+            const likeButton = msgDiv.querySelector('[data-action="helpful"]');
+            const dislikeButton = msgDiv.querySelector('[data-action="unhelpful"]');
+            const retryButton = msgDiv.querySelector('[data-action="retry"]');
+            const sourceButton = msgDiv.querySelector('[data-action="sources"]');
+            const sourceCount = sourceButton.querySelector('.source-count');
+            let sourceRecords = [];
+            const seenSourceUrls = new Set();
+            let aiNodes;
             const thinkingLog = [];
             const thinkStart = Date.now();
             let thinkDone = false;
@@ -856,6 +1133,12 @@
                 thinkDone = true;
                 clearInterval(elapsedTimer);
                 elapsedNode.textContent = '';
+                const hasAnswer = Boolean(contentNode.innerText.trim());
+                copyButton.disabled = !hasAnswer;
+                speakButton.disabled = !hasAnswer;
+                likeButton.disabled = !hasAnswer;
+                dislikeButton.disabled = !hasAnswer;
+                retryButton.disabled = msgDiv !== lastAssistantNodes?.msgDiv;
                 statusTextNode.classList.remove('shimmer');
                 if (!thinkingLog.length) {
                     statusNode.style.display = 'none';
@@ -873,38 +1156,104 @@
             function renderSources(sources) {
                 const row = msgDiv.querySelector('.sources-row');
                 if (!Array.isArray(sources) || !sources.length) return;
-                const seen = new Set([...row.querySelectorAll('a')].map(a => a.href));
                 sources.forEach(s => {
                     if (!s || !s.url) return;
-                    if (seen.has(s.url)) return;
-                    seen.add(s.url);
+                    let parsedUrl;
+                    try { parsedUrl = new URL(String(s.url)); } catch { return; }
+                    if (!['http:', 'https:'].includes(parsedUrl.protocol)) return;
+                    const url = parsedUrl.href;
+                    if (seenSourceUrls.has(url)) return;
+                    seenSourceUrls.add(url);
+                    const domain = safeDomain(url);
+                    const normalized = {
+                        title: String(s.title || domain).slice(0, 180),
+                        url,
+                        domain
+                    };
+                    sourceRecords.push(normalized);
                     const a = document.createElement('a');
                     a.className = 'source-card';
-                    a.href = s.url;
+                    a.href = url;
                     a.target = '_blank';
                     a.rel = 'noopener noreferrer';
-                    const domain = s.domain || safeDomain(s.url);
                     const logo = `https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(domain)}`;
                     a.innerHTML = `
                         <img src="${logo}" alt="" loading="lazy" onerror="this.style.display='none'" />
-                        <span><span class="src-title">${escapeHtml(s.title || domain)}</span><br/><span class="src-domain">${escapeHtml(domain)}</span></span>
+                        <span><span class="src-title">${escapeHtml(normalized.title)}</span><br/><span class="src-domain">${escapeHtml(domain)}</span></span>
                     `;
                     row.appendChild(a);
                 });
                 if (row.children.length) row.style.display = 'flex';
+                if (!aiNodes) return;
+                aiNodes.sources = sourceRecords;
+                sourceButton.disabled = !sourceRecords.length;
+                sourceButton.title = sourceRecords.length
+                    ? `View ${sourceRecords.length} source${sourceRecords.length === 1 ? '' : 's'}`
+                    : 'No sources were fetched for this response';
+                sourceButton.setAttribute('aria-label', sourceRecords.length
+                    ? `View ${sourceRecords.length} source${sourceRecords.length === 1 ? '' : 's'} for this response`
+                    : 'No sources were fetched for this response');
+                sourceCount.textContent = sourceRecords.length ? String(sourceRecords.length) : '';
+                if (activeSourceNodes === aiNodes) renderSourcesPanel(aiNodes);
             }
 
-            return {
+            aiNodes = {
+                msgDiv,
                 statusNode,
                 orbHost: msgDiv.querySelector('.thinking-orb-host'),
                 statusTextNode,
-                contentNode: msgDiv.querySelector('.ai-content'),
+                contentNode,
                 logNode,
+                requestContext,
+                sources: sourceRecords,
+                answerText: '',
+                feedback: '',
+                copyButton,
+                speakButton,
+                likeButton,
+                dislikeButton,
+                retryButton,
+                sourceButton,
                 setThinking,
                 pushThinking,
                 markThinkingDone,
                 renderSources
             };
+            lastAssistantNodes = aiNodes;
+            copyButton.addEventListener('click', () => copyResponse(aiNodes));
+            speakButton.addEventListener('click', () => speakResponse(aiNodes));
+            likeButton.addEventListener('click', () => setResponseFeedback(aiNodes, 'up'));
+            dislikeButton.addEventListener('click', () => setResponseFeedback(aiNodes, 'down'));
+            retryButton.addEventListener('click', () => retryAssistantResponse(aiNodes));
+            sourceButton.addEventListener('click', () => {
+                if (activeSourceNodes === aiNodes && sourceSidebar.classList.contains('is-open')) {
+                    closeSourcesPanel();
+                } else {
+                    openSourcesPanel(aiNodes);
+                }
+            });
+            return aiNodes;
+        }
+
+        function retryAssistantResponse(nodes) {
+            const context = nodes?.requestContext;
+            if (!context || responseIsStreaming || nodes !== lastAssistantNodes) return;
+
+            if (chatHistory[chatHistory.length - 1]?.role === 'assistant') chatHistory.pop();
+            if (activeSourceNodes === nodes) closeSourcesPanel(false);
+            if (activeSpeechButton === nodes.speakButton) stopSpeaking();
+
+            const retryNodes = appendAIMessage(context);
+            nodes.msgDiv.before(retryNodes.msgDiv);
+            hideThinkingOrb(nodes.orbHost);
+            nodes.msgDiv.remove();
+            handleAIResponse(
+                context.prompt,
+                retryNodes,
+                context.history,
+                context.conversationId,
+                context.tripPending
+            );
         }
 
         function escapeHtml(s) {
@@ -1146,7 +1495,7 @@
         }
 
         // Send the user's message and recent conversation to the real AI backend.
-        async function handleAIResponse(prompt, aiNodes, history, requestConversationId) {
+        async function handleAIResponse(prompt, aiNodes, history, requestConversationId, requestTripPending = tripIntakePending) {
             const statusContainer = aiNodes.statusNode;
             const contentNode = aiNodes.contentNode;
             const thinkingOrbHost = aiNodes.orbHost;
@@ -1161,7 +1510,7 @@
                 const response = await fetch(`${BACKEND_URL}/chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: prompt, history, trip_pending: tripIntakePending })
+                    body: JSON.stringify({ message: prompt, history, trip_pending: requestTripPending })
                 });
                 if (requestConversationId !== conversationId) return;
                 if (!response.ok) {
@@ -1257,6 +1606,7 @@
                 showThinkingOrb(thinkingOrbHost, 'breathing');
                 aiNodes.markThinkingDone();
                 if (!reply.trim()) throw new Error('The AI returned an empty response. Please try again.');
+                aiNodes.answerText = reply.trim();
                 chatHistory.push({ role: 'assistant', content: reply.trim() });
             } catch (error) {
                 if (requestConversationId !== conversationId) return;
