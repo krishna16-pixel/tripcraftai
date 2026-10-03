@@ -828,6 +828,8 @@ def _format_trip_reply(plan: dict, assumptions: list) -> str:
 async def _stream_trip_chat(message: str, history: list):
     """SSE stream for a trip request made in chat: asks for missing places, or runs
     the real planner and streams its live phases, then the finished itinerary."""
+    yield _data({"status": "Checking request", "detail": "Trip planning request"})
+    yield _data({"status": "Reading trip details", "detail": "Extracting origin, destinations, dates and budget"})
     try:
         req = await _trip_request_from_chat(message, history)
     except Exception as exc:
@@ -907,6 +909,7 @@ async def chat(request: ChatRequest):
         async def stream_live():
             if request.trip_pending:
                 yield _sse({"trip_pending": False})
+            yield _sse({"status": "Checking request", "detail": "Travel or current-info question: using live tools"})
             try:
                 async for event in live_chat.stream_live_chat(agent_llm, request.message, history):
                     yield _sse(event)
@@ -935,6 +938,8 @@ async def chat(request: ChatRequest):
     async def stream_reply():
         if request.trip_pending:
             yield _sse({"trip_pending": False})
+        yield _sse({"status": "Checking request", "detail": "General conversation: no live lookup needed"})
+        yield _sse({"status": "Writing reply", "detail": f"model: {GLM_CHAT_MODEL}"})
         try:
             async for chunk in chat_llm.astream(messages):
                 token = chunk.content
