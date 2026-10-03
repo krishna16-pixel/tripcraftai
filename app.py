@@ -479,7 +479,8 @@ async def draft_phase(
     prompt = _with_custom_prompt(
         "Build a complete, realistic day-by-day multi-city itinerary from the "
         "constraints and research below. Every day in the date range must "
-        "appear exactly once. Respect the daily time window and pace. Include "
+        "appear exactly once. Respect the daily time window and pace. "
+        "Write every time as plain local HH:MM with no timezone or UTC offset. Include "
         "a `transfer` on any day the traveler changes cities, with realistic "
         "depart/arrive times for the chosen mode. Give every activity a "
         "realistic estimated_cost (0 is fine for free things) and, when the "
